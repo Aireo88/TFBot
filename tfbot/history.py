@@ -31,6 +31,7 @@ from .panels import (
     get_selected_pose_outfit,
     list_background_choices,
 )
+from .utils import get_setting
 
 logger = logging.getLogger("tfbot.history")
 
@@ -331,7 +332,18 @@ def _chunk_sections(sections: Sequence[str], max_length: int = 3600, max_chunks:
 
 async def _fetch_history_channel(bot: discord.Client, channel_id: Optional[int]) -> discord.TextChannel:
     if channel_id is None:
-        raw = os.getenv("TFBOT_HISTORY_SNAPSHOT_CHANNEL")
+        # Read TFBOT_TEST flag to determine mode (same logic as bot.py)
+        TFBOT_TEST_RAW = os.getenv("TFBOT_TEST", "").strip().upper()
+        if not TFBOT_TEST_RAW:
+            test_mode: Optional[bool] = None  # Backward compatible
+        elif TFBOT_TEST_RAW in ("YES", "TRUE", "1", "ON"):
+            test_mode = True  # TEST mode
+        elif TFBOT_TEST_RAW in ("NO", "FALSE", "0", "OFF"):
+            test_mode = False  # LIVE mode
+        else:
+            test_mode = None  # Invalid value, default to backward compatible
+        
+        raw = get_setting("TFBOT_HISTORY_SNAPSHOT_CHANNEL", "", test_mode)
         if raw and raw.isdigit():
             channel_id = int(raw)
         else:

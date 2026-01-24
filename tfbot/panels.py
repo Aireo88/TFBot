@@ -1,4 +1,4 @@
-﻿"""Visual novel panel rendering and helpers."""
+"""Visual novel panel rendering and helpers."""
 
 from __future__ import annotations
 
@@ -129,10 +129,15 @@ elif VN_GAME_ROOT:
 else:
     VN_BACKGROUND_ROOT = None
 
-_BG_SELECTION_FILE_SETTING = os.getenv("TFBOT_VN_BG_SELECTIONS", "tf_backgrounds.json").strip()
-VN_BACKGROUND_SELECTION_FILE = (
-    Path(_BG_SELECTION_FILE_SETTING) if _BG_SELECTION_FILE_SETTING else None
-)
+_BG_SELECTION_FILE_SETTING = os.getenv("TFBOT_VN_BG_SELECTIONS", "vn_states/tf_backgrounds.json").strip()
+if _BG_SELECTION_FILE_SETTING:
+    _bg_path = Path(_BG_SELECTION_FILE_SETTING)
+    if _bg_path.is_absolute():
+        VN_BACKGROUND_SELECTION_FILE = _bg_path.resolve()
+    else:
+        VN_BACKGROUND_SELECTION_FILE = (BASE_DIR / _bg_path).resolve()
+else:
+    VN_BACKGROUND_SELECTION_FILE = None
 VN_NAME_DEFAULT_COLOR: Tuple[int, int, int, int] = (255, 220, 180, 255)
 _VN_CACHE_DIR_SETTING = os.getenv("TFBOT_VN_CACHE_DIR", "vn_cache").strip()
 if _VN_CACHE_DIR_SETTING:
@@ -452,7 +457,15 @@ def _run_face_git_batch_for_repo(
     )
 
 
-VN_SELECTION_FILE = Path(os.getenv("TFBOT_VN_SELECTIONS", "tf_outfits.json"))
+_vn_selection_setting = os.getenv("TFBOT_VN_SELECTIONS", "vn_states/tf_outfits.json").strip()
+if _vn_selection_setting:
+    _vn_selection_path = Path(_vn_selection_setting)
+    if _vn_selection_path.is_absolute():
+        VN_SELECTION_FILE = _vn_selection_path.resolve()
+    else:
+        VN_SELECTION_FILE = (BASE_DIR / _vn_selection_path).resolve()
+else:
+    VN_SELECTION_FILE = None
 _VN_LAYOUT_FILE_SETTING = os.getenv("TFBOT_VN_LAYOUTS", "vn_layouts.json").strip()
 if _VN_LAYOUT_FILE_SETTING:
     layout_path = Path(_VN_LAYOUT_FILE_SETTING)
@@ -1625,6 +1638,7 @@ def _cache_character_face_background(
     variant_dir: Path,
     avatar_image: "Image.Image",
     git_repo_root: Optional[Path],
+    force: bool = False,
 ) -> None:
     """
     Background thread function to cache face and commit to git.
@@ -1634,6 +1648,7 @@ def _cache_character_face_background(
         variant_dir: Variant directory path
         avatar_image: Fully composed avatar PIL Image (copy for thread safety)
         git_repo_root: Git repository root directory (characters_repo), or None if not found
+        force: If True, skip existence checks and always regenerate face (default: False)
     """
     if not FACE_MODEL_PATH.exists():
         return
@@ -1654,22 +1669,26 @@ def _cache_character_face_background(
         cache_dir = face_cache_dir / character_dir.name.lower() / variant_dir.name.lower()
         cache_file = cache_dir / "face.png"
         
-        # Check if already cached locally
-        if cache_file.exists():
-            logger.debug("Face already cached locally for %s/%s", character_dir.name, variant_dir.name)
-            return
-        
-        # Check if exists in remote git repository
-        if git_repo_root and git_repo_root.exists():
-            face_relative_path = cache_file.relative_to(git_repo_root)
-            if _check_face_exists_in_remote(git_repo_root, face_relative_path):
-                logger.debug("Face exists in remote for %s/%s, pulling...", character_dir.name, variant_dir.name)
-                # Pull the file from remote
-                _sync_faces_from_remote(git_repo_root)
-                # Check again after pull
-                if cache_file.exists():
-                    logger.debug("Face pulled from remote for %s/%s", character_dir.name, variant_dir.name)
-                    return
+        # Skip existence checks if force=True (always regenerate)
+        if not force:
+            # Check if already cached locally
+            if cache_file.exists():
+                logger.debug("Face already cached locally for %s/%s", character_dir.name, variant_dir.name)
+                return
+            
+            # Check if exists in remote git repository
+            if git_repo_root and git_repo_root.exists():
+                face_relative_path = cache_file.relative_to(git_repo_root)
+                if _check_face_exists_in_remote(git_repo_root, face_relative_path):
+                    logger.debug("Face exists in remote for %s/%s, pulling...", character_dir.name, variant_dir.name)
+                    # Pull the file from remote
+                    _sync_faces_from_remote(git_repo_root)
+                    # Check again after pull
+                    if cache_file.exists():
+                        logger.debug("Face pulled from remote for %s/%s", character_dir.name, variant_dir.name)
+                        return
+        else:
+            logger.debug("Force mode: regenerating face for %s/%s even if it exists", character_dir.name, variant_dir.name)
         
         # Import face detection
         from tfbot.face_detection import detect_faces_in_pil_image
@@ -1808,6 +1827,7 @@ def _cache_character_face(
     character_dir: Path,
     variant_dir: Path,
     avatar_image: "Image.Image",
+    force: bool = False,
 ) -> None:
     """
     Cache the detected face from a character's avatar image in a background thread.
@@ -1817,6 +1837,7 @@ def _cache_character_face(
         character_dir: Character directory path
         variant_dir: Variant directory path
         avatar_image: Fully composed avatar PIL Image
+        force: If True, skip existence checks and always regenerate the face (default: False)
     """
     if not FACE_MODEL_PATH.exists():
         return
@@ -1837,19 +1858,23 @@ def _cache_character_face(
     cache_dir = face_cache_dir / character_dir.name.lower() / variant_dir.name.lower()
     cache_file = cache_dir / "face.png"
     
-    # Check if already cached locally
-    if cache_file.exists():
-        logger.debug("Face already cached locally for %s/%s", character_dir.name, variant_dir.name)
-        return
-    
-    # Check remote if in git repo (quick check before launching thread)
-    if git_repo_root and git_repo_root.exists():
-        face_relative_path = cache_file.relative_to(git_repo_root)
-        if _check_face_exists_in_remote(git_repo_root, face_relative_path):
-            logger.debug("Face exists in remote for %s/%s, syncing...", character_dir.name, variant_dir.name)
-            # Queue sync operation through worker
-            _sync_faces_from_remote(git_repo_root)
+    # Skip existence checks if force=True (always regenerate)
+    if not force:
+        # Check if already cached locally
+        if cache_file.exists():
+            logger.debug("Face already cached locally for %s/%s", character_dir.name, variant_dir.name)
             return
+        
+        # Check remote if in git repo (quick check before launching thread)
+        if git_repo_root and git_repo_root.exists():
+            face_relative_path = cache_file.relative_to(git_repo_root)
+            if _check_face_exists_in_remote(git_repo_root, face_relative_path):
+                logger.debug("Face exists in remote for %s/%s, syncing...", character_dir.name, variant_dir.name)
+                # Queue sync operation through worker
+                _sync_faces_from_remote(git_repo_root)
+                return
+    else:
+        logger.debug("Force mode: regenerating face for %s/%s even if it exists", character_dir.name, variant_dir.name)
     
     # Ensure periodic sync scheduler is running
     try:
@@ -1868,7 +1893,7 @@ def _cache_character_face(
     # Launch background thread to detect and cache face
     thread = threading.Thread(
         target=_cache_character_face_background,
-        args=(character_dir, variant_dir, avatar_copy, git_repo_root),
+        args=(character_dir, variant_dir, avatar_copy, git_repo_root, force),
         daemon=True,
         name=f"face-cache-{character_dir.name}-{variant_dir.name}",
     )
@@ -3345,8 +3370,7 @@ def render_vn_panel(
                 cursor_y += ROW_SPACING
 
     working_content = message_content.strip()
-    if not working_content:
-        working_content = f"{original_name} remains quietly transformed..."
+    # Removed fallback message - empty content is allowed for image-only posts
 
     background_path = get_selected_background_path(state.user_id)
     background_layer = compose_background_layer((base.width, base.height), background_path)

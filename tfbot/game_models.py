@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Set
 
 # Import here to avoid circular dependency - only used in type annotation
 from typing import TYPE_CHECKING
@@ -44,6 +44,8 @@ class GameState:
     turn_count: int = 0  # Current turn number (increments each turn)
     game_started: bool = False  # Game ready to start - blocks dice rolls until GM issues !start command
     is_paused: bool = False  # Game paused - blocks dice rolls (GM can still force rolls)
+    bot_user_id: Optional[int] = None  # Bot user ID that owns this game (prevents multiple bots from processing same game)
+    enabled_packs: Optional[Set[str]] = None  # Pack file names enabled for this game (snapshot at game start)
 
 
 @dataclass

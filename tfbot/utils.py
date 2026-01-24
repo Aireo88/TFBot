@@ -55,6 +55,67 @@ def parse_channel_ids(raw: str) -> Set[int]:
     return ids
 
 
+def get_channel_id(env_name: str, default: int = 0, test_mode: Optional[bool] = None) -> int:
+    """
+    Get channel ID with backward compatibility and live/test mode support.
+    
+    Behavior:
+    - If test_mode is None (TFBOT_TEST not defined): Use current format (backward compatible)
+    - If test_mode=True (TFBOT_TEST=YES): Use _TEST suffixed channels
+    - If test_mode=False (TFBOT_TEST=NO): Use _LIVE suffixed channels
+    
+    NO FALLBACK between modes - if channel not set in active mode, returns default (0).
+    Core channels still error on launch if missing (handled by caller).
+    
+    Args:
+        env_name: Base name (e.g., "TFBOT_CHANNEL_ID")
+        default: Default value if not found (typically 0 to disable)
+        test_mode: None = backward compat (current format), False = LIVE, True = TEST
+    
+    Returns:
+        Channel ID from appropriate variant, or default if not set
+    """
+    if test_mode is None:
+        # Backward compatibility: Use current format (no suffix)
+        return int_from_env(env_name, default)
+    elif test_mode:
+        # TEST mode: Use _TEST suffix
+        return int_from_env(f"{env_name}_TEST", default)
+    else:
+        # LIVE mode: Use _LIVE suffix
+        return int_from_env(f"{env_name}_LIVE", default)
+
+
+def get_setting(env_name: str, default: str = "", test_mode: Optional[bool] = None) -> str:
+    """
+    Get setting with backward compatibility and live/test mode support.
+    
+    Behavior:
+    - If test_mode is None (TFBOT_TEST not defined): Use current format (backward compatible)
+    - If test_mode=True (TFBOT_TEST=YES): Use _TEST suffixed settings, fallback to base name
+    - If test_mode=False (TFBOT_TEST=NO): Use _LIVE suffixed settings, fallback to base name
+    
+    Falls back to base name if mode-specific variant is not found (allows gradual migration).
+    
+    Args:
+        env_name: Base name (e.g., "TFBOT_NAME")
+        default: Default value if not found
+        test_mode: None = backward compat (current format), False = LIVE, True = TEST
+    
+    Returns:
+        Setting value from appropriate variant, or default if not set
+    """
+    if test_mode is None:
+        # Backward compatibility: Use current format (no suffix)
+        return os.getenv(env_name, default).strip()
+    elif test_mode:
+        # TEST mode: Use _TEST suffix, fallback to base name
+        return os.getenv(f"{env_name}_TEST", os.getenv(env_name, default)).strip()
+    else:
+        # LIVE mode: Use _LIVE suffix, fallback to base name
+        return os.getenv(f"{env_name}_LIVE", os.getenv(env_name, default)).strip()
+
+
 def normalize_pose_name(pose: Optional[str]) -> Optional[str]:
     if pose is None:
         return None
@@ -87,6 +148,8 @@ def utc_now() -> datetime:
 
 __all__ = [
     "float_from_env",
+    "get_channel_id",
+    "get_setting",
     "int_from_env",
     "is_admin",
     "member_profile_name",

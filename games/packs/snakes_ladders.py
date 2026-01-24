@@ -45,6 +45,7 @@ def get_game_data(game_state: GameState) -> Dict:
             'winners': [],  # List of user_ids who have won (cannot roll dice anymore)
             'players_reached_end_this_turn': [],  # List of user_ids who reached the end tile this turn (for multi-winner detection)
             'goal_reached_turn': {},  # user_id -> turn_number when they reached the goal (for determining winners)
+            'forfeited_players': [],  # List of user_ids who have forfeited (cannot roll dice anymore, skipped in turn order)
         }
     return game_state._pack_data
 
@@ -124,6 +125,16 @@ def alphanumeric_to_tile_number(coord: str, game_config: GameConfig) -> Optional
     return tile_num
 
 
+def _sort_turn_order_by_player_number(data: dict) -> None:
+    """Sort turn_order by player_number to maintain correct order."""
+    turn_order = data.get('turn_order', [])
+    player_numbers = data.get('player_numbers', {})
+    if turn_order and player_numbers:
+        # Sort by player number (999 for players without numbers = end of list)
+        turn_order.sort(key=lambda uid: player_numbers.get(uid, 999))
+        data['turn_order'] = turn_order
+
+
 def on_player_added(game_state: GameState, player: GamePlayer, game_config: GameConfig) -> None:
     """Called when a player is added to the game."""
     data = get_game_data(game_state)
@@ -132,8 +143,16 @@ def on_player_added(game_state: GameState, player: GamePlayer, game_config: Game
     rules = game_config.rules or {}
     starting_tile = int(rules.get("starting_tile", 1))
     starting_position = rules.get("starting_position", "A1")
-    data['tile_numbers'][player.user_id] = starting_tile
-    player.grid_position = str(starting_position)  # Set grid position from config
+    # CRITICAL: Only set tile_number if it doesn't already exist (preserved from before they quit)
+    # If tile_number exists, it means they're being re-added and should keep their position
+    if player.user_id not in data.get('tile_numbers', {}):
+        data['tile_numbers'][player.user_id] = starting_tile
+        player.grid_position = str(starting_position)  # Set grid position from config
+    else:
+        # Player is being re-added - preserve their existing tile_number
+        # grid_position should already be set by command_addplayer
+        logger.debug("Preserving existing tile_number %s for re-added player %s", 
+                    data['tile_numbers'][player.user_id], player.user_id)
     
     # Initialize other fields
     data['transformation_counts'][player.user_id] = 0
@@ -142,14 +161,25 @@ def on_player_added(game_state: GameState, player: GamePlayer, game_config: Game
     data['mind_changed'][player.user_id] = False
     
     # Add to turn order if not present (maintain order players were added)
-    if player.user_id not in data['turn_order']:
+    is_new_player = player.user_id not in data['turn_order']
+    if is_new_player:
         data['turn_order'].append(player.user_id)
         # Assign player number based on order added (1-indexed)
+        # CRITICAL: Only assign if they don't already have a player number (preserved from before they quit)
         if 'player_numbers' not in data:
             data['player_numbers'] = {}
-        data['player_numbers'][player.user_id] = len(data['turn_order'])
+        if player.user_id not in data['player_numbers']:
+            # New player - assign number based on turn_order length
+            data['player_numbers'][player.user_id] = len(data['turn_order'])
+        # If they already have a player_number (re-added after quit), keep it
         if len(data['turn_order']) == 1:
             data['current_turn_index'] = 0
+        
+        # CRITICAL: Only sort turn_order when adding NEW players (initial setup)
+        # Once the game starts, turn order should be immutable to prevent mid-game changes
+        # Re-added players should maintain their original position in the turn order
+        _sort_turn_order_by_player_number(data)
+    # If player is already in turn_order (re-added), don't sort - preserve existing order
 
 
 def on_character_assigned(game_state: GameState, player: GamePlayer, character_name: str) -> None:
@@ -194,6 +224,10 @@ def on_dice_rolled(
     if player.user_id in data.get('winners', []):
         return (f"🎉 You've already won! You cannot roll dice anymore. The game continues for other players.", False, None, False)
     
+    # CRITICAL: Check if player has forfeited - forfeited players cannot roll dice
+    if player.user_id in data.get('forfeited_players', []):
+        return (f"😔 You've forfeited! You cannot roll dice anymore. The game continues for other players.", False, None, False)
+    
     # CRITICAL: Check if player is at the goal tile - they cannot roll (even if not in winners list yet)
     current_tile = data['tile_numbers'].get(player.user_id, 1)
     if current_tile >= win_tile:
@@ -203,13 +237,22 @@ def on_dice_rolled(
     if player.user_id in data['players_rolled_this_turn']:
         return (f"You've already rolled this turn! Wait for the turn summary.", False, None, False)
     
-    # Check if it's player's turn to roll (next player in turn_order who hasn't rolled AND isn't at goal)
+    # Check if it's player's turn to roll (next player in turn_order who hasn't rolled AND isn't at goal AND hasn't forfeited)
     if data['turn_order']:
-        # Find next player who hasn't rolled AND isn't at the goal tile
+        forfeited_players = set(data.get('forfeited_players', []))
+        # Find next player who hasn't rolled AND isn't at the goal tile AND hasn't forfeited
         next_player_id = None
         for user_id in data['turn_order']:
+            # CRITICAL: Skip players not in game_state.players (removed/forfeited) - Issue #9
+            if user_id not in game_state.players:
+                logger.debug("Skipping player %s in turn order - not in game_state.players (removed)", user_id)
+                continue
             # Skip players who have already rolled this turn
             if user_id in data['players_rolled_this_turn']:
+                continue
+            # Skip forfeited players
+            if user_id in forfeited_players:
+                logger.debug("Skipping player %s in turn order - forfeited", user_id)
                 continue
             # Skip players who are at the goal tile (they cannot roll)
             player_tile = data['tile_numbers'].get(user_id, 1)
@@ -228,9 +271,14 @@ def on_dice_rolled(
             # Not this player's turn yet - provide helpful message
             next_player_num = data.get('player_numbers', {}).get(next_player_id, "?")
             current_player_num = data.get('player_numbers', {}).get(player.user_id, "?")
+            
+            # Get next player's character name
+            next_player = game_state.players.get(next_player_id)
+            next_player_name = next_player.character_name if next_player and next_player.character_name else f"Player {next_player_num}"
+            
             logger.debug("Turn check: player %s (Player %s) tried to roll, but it's Player %s's turn (user_id=%s)", 
                         player.user_id, current_player_num, next_player_num, next_player_id)
-            return (f"It's not your turn yet! Waiting for Player {next_player_num} to roll.", False, None, False)
+            return (f"It's not your turn yet! Waiting for Player {next_player_num} ({next_player_name}) to roll.", False, None, False)
     
     # Get current tile
     current_tile = data['tile_numbers'].get(player.user_id, 1)
@@ -305,34 +353,32 @@ def on_dice_rolled(
         )
         message_parts.append(f"🪜 Ladder! Climbed up to tile {top_tile}")
     
-    # Apply tile transformation (tiles 2-99) - AFTER snake/ladder movement
-    transformation_char = None
+    # Check tile color for informational message only (GM use) - NO automatic transformations
+    # Tile colors are informational only - GM must manually trigger transformations using commands
+    # Only snakes and ladders have automatic effects
+    transformation_char = None  # No automatic transformations from tile colors
     if 2 <= final_tile <= 99:
-        transform_msg, new_char = apply_tile_transformation(game_state, player, final_tile, game_config)
-        if transform_msg:
-            message_parts.append(transform_msg)
-        if new_char:
-            transformation_char = new_char
-            # Update player's character name
-            player.character_name = new_char
+        info_msg = get_tile_color_info(final_tile, game_config)
+        if info_msg:
+            message_parts.append(info_msg)
         logger.debug(
-            "on_dice_rolled: transformation check tile=%s message=%s new_char=%s",
+            "on_dice_rolled: tile color info check tile=%s message=%s",
             final_tile,
-            transform_msg,
-            transformation_char,
+            info_msg,
         )
     
     # Mark player as having rolled this turn
     if player.user_id not in data['players_rolled_this_turn']:
         data['players_rolled_this_turn'].append(player.user_id)
     
-    # Check if turn is complete (all ACTIVE players have rolled - skip players at goal)
+    # Check if turn is complete (all ACTIVE players have rolled - skip players at goal and forfeited players)
     is_turn_complete = False
     if data['turn_order']:
-        # Count only active players (those not at the goal tile)
+        forfeited_players = set(data.get('forfeited_players', []))
+        # Count only active players (those not at the goal tile and not forfeited)
         active_players = [
             uid for uid in data['turn_order']
-            if data['tile_numbers'].get(uid, 1) < win_tile
+            if uid in game_state.players and uid not in forfeited_players and data['tile_numbers'].get(uid, 1) < win_tile
         ]
         # Turn is complete when all active players have rolled
         active_players_rolled = [
@@ -360,43 +406,40 @@ def on_dice_rolled(
     return ("\n".join(message_parts), True, transformation_char, is_turn_complete)
 
 
-def apply_tile_transformation(
-    game_state: GameState,
-    player: GamePlayer,
+def get_tile_color_info(
     tile_number: int,
     game_config: GameConfig,
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Optional[str]:
     """
-    Apply transformation based on tile color/effect.
+    Get informational message about tile color/effect (GM use only).
+    Tile colors are informational only - NO automatic transformations.
+    GM must manually trigger transformations using commands (!reroll, !swap, etc.).
     
-    Returns: (message, new_character_name)
-    - message: Message to display about the transformation
-    - new_character_name: Character name to transform to (None if no transformation)
+    Returns: Informational message about the tile color (None if no color)
     """
-    data = get_game_data(game_state)
-    
     # Get tile color mapping from config
     if not game_config or not game_config.rules:
-        return (None, None)
+        return None
     
     tile_colors_map = game_config.rules.get("tile_colors_map", {})
     tile_color = tile_colors_map.get(str(tile_number))
     
     if not tile_color:
-        return (None, None)
+        return None
     
     # Map image colors to config colors
     # Image has: yellow, blue, purple, red, green (repeating pattern)
     # Config expects: yellow, light_blue/dark_blue, purple, red, green, orange, pink
-    # Map "blue" from image to "dark_blue" (age_change)
-    # Note: Some blue tiles might be light_blue (real_body) but we'll use dark_blue as default
-    # GM can manually adjust if needed
     color_mapping = {
-        "yellow": "yellow",      # random_transform
-        "blue": "dark_blue",     # age_change (image blue → dark_blue)
-        "purple": "purple",      # revert_body
-        "red": "red",            # transform_other
-        "green": "green"         # body_swap
+        "yellow": "yellow",
+        "green": "green",
+        "pink": "pink",
+        "dark_blue": "dark_blue",
+        "light_blue": "light_blue",
+        "orange": "orange",
+        "purple": "purple",
+        "red": "red",
+        "blue": "dark_blue"  # Fallback for old "blue" references
     }
     
     # Convert image color to config color
@@ -407,79 +450,46 @@ def apply_tile_transformation(
     effect = color_effects.get(config_color)
     
     if not effect:
-        return (None, None)
+        return None
     
-    # Import character data
-    import sys
-    bot_module = sys.modules.get('bot')
-    if not bot_module:
-        return (None, None)
+    # Create color-to-emoji mapping (use actual tile color, not effect type)
+    color_emoji_map = {
+        "yellow": "🟡",
+        "green": "🟢",
+        "pink": "🩷",
+        "dark_blue": "🔵",
+        "light_blue": "🔵",  # Use same emoji as dark_blue (no distinct light blue emoji)
+        "orange": "🟠",
+        "purple": "🟣",
+        "red": "🔴",
+    }
     
-    CHARACTER_BY_NAME = getattr(bot_module, 'CHARACTER_BY_NAME', None)
-    if not CHARACTER_BY_NAME:
-        return (None, None)
+    # Get emoji based on actual tile color (not effect type)
+    emoji = color_emoji_map.get(config_color, "ℹ️")
     
-    available = list(CHARACTER_BY_NAME.keys())
-    if not available:
-        return (None, None)
+    # Color-to-description mapping
+    color_descriptions = {
+        "orange": "Gender Swap",
+        "dark_blue": "Age Swap",
+        "light_blue": "Save Body",
+        "purple": "Load Saved Body (or original if none saved)",
+        "yellow": "Random Transformation",
+        "red": "Random Transformation for Someone Else",
+        "green": "Body Swap",
+        "pink": "Mind Change/Command",
+    }
     
-    old_char = player.character_name
+    # Get description for the tile color
+    description = color_descriptions.get(config_color, "special effect")
     
-    # Check if mind change should be undone (any transformation undoes it)
-    mind_was_changed = data['mind_changed'].get(player.user_id, False)
-    mind_undo_msg = ""
-    if mind_was_changed and effect in ("gender_swap", "random_transform", "age_change", "body_swap"):
-        data['mind_changed'][player.user_id] = False
-        mind_undo_msg = " (Mind change undone!)"
+    # Format message with color name and emoji based on actual tile color
+    # Capitalize first letter of color name for display
+    color_display = config_color.replace("_", " ").title()
     
-    # Apply effect
-    if effect == "gender_swap":
-        new_char = random.choice(available)
-        message = f"🟠 Gender swap! {old_char} → {new_char}{mind_undo_msg}"
-        data['transformation_counts'][player.user_id] += 1
-        return (message, new_char)
+    # Use proper article (an for Orange, a for others)
+    article = "an" if color_display.lower().startswith(("a", "e", "i", "o", "u")) else "a"
     
-    elif effect == "real_body":
-        if player.character_name:
-            data['real_body_characters'][player.user_id] = player.character_name
-            message = f"🔵 Current body ({player.character_name}) is now your real body!"
-            return (message, None)  # No transformation, just setting real body
-    
-    elif effect == "revert_body":
-        real_body = data['real_body_characters'].get(player.user_id)
-        if real_body:
-            message = f"🟣 Reverted to real body: {real_body}"
-            return (message, real_body)  # Transform to real body
-        message = "🟣 No real body set - no change"
-        return (message, None)
-    
-    elif effect == "body_swap":
-        message = "🟢 Body swap! GM: use !swap command to choose target"
-        return (message, None)  # No automatic transformation
-    
-    elif effect == "random_transform":
-        new_char = random.choice(available)
-        message = f"🟡 Random transformation! {old_char} → {new_char}{mind_undo_msg}"
-        data['transformation_counts'][player.user_id] += 1
-        return (message, new_char)
-    
-    elif effect == "mind_change":
-        data['mind_changed'][player.user_id] = True
-        message = "🩷 Mind changed! Can be undone if transformed before next turn"
-        return (message, None)  # No transformation
-    
-    elif effect == "transform_other":
-        message = "🔴 Transform other! GM: use !reroll @target to transform someone"
-        return (message, None)  # No automatic transformation
-    
-    elif effect == "age_change":
-        # Age change - transform to random character
-        new_char = random.choice(available)
-        message = f"🔵 Age change! {old_char} → {new_char}{mind_undo_msg}"
-        data['transformation_counts'][player.user_id] += 1
-        return (message, new_char)
-    
-    return (None, None)
+    return f"{emoji} Landed on {article} {color_display} tile - {description}"
 
 
 def check_win_condition(game_state: GameState, game_config: GameConfig) -> Tuple[Optional[str], bool]:
@@ -570,17 +580,36 @@ def check_win_condition(game_state: GameState, game_config: GameConfig) -> Tuple
                 else:
                     winner_mentions.append(f"<@{user_id}>")
             
-            # Build all players message
+            # Build all players message (including forfeited/removed players)
+            # Use turn_order to get ALL players who were ever in the game, not just those with tile_numbers
+            forfeited_players = set(data.get('forfeited_players', []))
             all_player_names = []
-            for user_id in data['tile_numbers'].keys():
+            # Get all players from turn_order (includes removed/forfeited players)
+            all_player_ids = set(data.get('turn_order', []))
+            # Also include any players in tile_numbers who might not be in turn_order (defensive)
+            all_player_ids.update(data.get('tile_numbers', {}).keys())
+            
+            for user_id in sorted(all_player_ids, key=lambda uid: data.get('player_numbers', {}).get(uid, 999)):
                 player = game_state.players.get(user_id)
-                if player:
-                    player_name = player.character_name or f"Player {user_id}"
-                    player_num = data.get('player_numbers', {}).get(user_id, "?")
-                    turn_reached = data['goal_reached_turn'].get(user_id, "?")
-                    all_player_names.append(f"<@{user_id}> ({player_name} - Player {player_num}, Turn {turn_reached})")
+                player_name = player.character_name if player and player.character_name else f"Player {user_id}"
+                player_num = data.get('player_numbers', {}).get(user_id, "?")
+                
+                # Check if forfeited/removed
+                if user_id in forfeited_players:
+                    # Forfeited/removed players show FORFEIT/QUIT status
+                    tile_num = data.get('tile_numbers', {}).get(user_id, "?")
+                    if tile_num != "?":
+                        all_player_names.append(f"<@{user_id}> ({player_name} - Player {player_num}, Tile {tile_num}, **FORFEIT/QUIT**)")
+                    else:
+                        all_player_names.append(f"<@{user_id}> ({player_name} - Player {player_num}, **FORFEIT/QUIT**)")
                 else:
-                    all_player_names.append(f"<@{user_id}>")
+                    # Finished players show turn reached
+                    tile_num = data.get('tile_numbers', {}).get(user_id, "?")
+                    turn_reached = data['goal_reached_turn'].get(user_id, "?")
+                    if tile_num != "?":
+                        all_player_names.append(f"<@{user_id}> ({player_name} - Player {player_num}, Tile {tile_num}, Turn {turn_reached})")
+                    else:
+                        all_player_names.append(f"<@{user_id}> ({player_name} - Player {player_num}, Turn {turn_reached})")
             
             if len(winners) == 1:
                 return (
@@ -672,12 +701,13 @@ def validate_move(game_state: GameState, player: GamePlayer, new_position: str, 
     return (True, None)
 
 
-def get_turn_summary(game_state: GameState, game_config: GameConfig) -> str:
+def get_turn_summary(game_state: GameState, game_config: GameConfig, guild: Optional[discord.Guild] = None) -> str:
     """
     Generate turn summary with leaderboard showing ALL players.
     
     Returns: Formatted message with all players' positions.
     """
+    import discord
     data = get_game_data(game_state)
     
     # Get all players with their tile numbers
@@ -693,27 +723,72 @@ def get_turn_summary(game_state: GameState, game_config: GameConfig) -> str:
     # Sort by tile number (highest = leader)
     player_positions.sort(key=lambda x: x[1], reverse=True)
     
-    # Build summary
+    # Build summary - format matches image: "Player X / Character Name / Username: Tile Y"
     summary_parts = ["**Turn Complete!**", "", "**Leaderboard (All Players):**"]
+    
+    # Get forfeited players for status display
+    forfeited_players = set(data.get('forfeited_players', []))
     
     # Show all players in order
     for idx, (user_id, tile_num, player) in enumerate(player_positions):
         player_name = player.character_name or f"Player {user_id}"
         player_num = data.get('player_numbers', {}).get(user_id, "?")
         
-        # Add emoji for positions
-        if idx == 0:
-            emoji = "🥇"
-        elif idx == len(player_positions) - 1:
-            emoji = "🥉"
+        # Get username (display name or mention)
+        username = f"User {user_id}"
+        if guild:
+            member = guild.get_member(user_id)
+            if member:
+                username = member.display_name
+        
+        # Add emoji for positions - scalable system for any number of players
+        # 1st-3rd: number emoji + medal, 4th-9th: single number emoji, 10th+: combined number emojis, last: number + fun emoji
+        position = idx + 1  # 1-indexed position
+        is_last = idx == len(player_positions) - 1
+        
+        # Number emoji mapping (0-9)
+        number_emojis = ["0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+        
+        if position == 1:
+            # 1st place: number + gold medal
+            emoji = "1️⃣🥇"
+        elif position == 2:
+            # 2nd place: number + silver medal
+            emoji = "2️⃣🥈"
+        elif position == 3:
+            # 3rd place: number + bronze medal
+            emoji = "3️⃣🥉"
+        elif position <= 9:
+            # 4th-9th place: single number emoji
+            emoji = number_emojis[position]
         else:
-            emoji = "📍"
+            # 10th+ place: combined number emojis
+            position_str = str(position)
+            emoji_parts = [number_emojis[int(digit)] for digit in position_str]
+            emoji = "".join(emoji_parts)
+            
+            # If last place (and not in top 3), add fun emoji
+            if is_last:
+                # Use different fun emojis based on position for variety
+                fun_emojis = ["🏁", "⚫", "🎯"]
+                fun_emoji = fun_emojis[position % len(fun_emojis)]
+                emoji = emoji + fun_emoji
+        
+        # Last place (if not already handled above) gets fun emoji
+        if is_last and position > 3 and position <= 9:
+            fun_emojis = ["🏁", "⚫", "🎯"]
+            fun_emoji = fun_emojis[position % len(fun_emojis)]
+            emoji = emoji + fun_emoji
         
         # Check if player is a winner
         is_winner = user_id in data.get('winners', [])
         winner_text = " 🏆 WINNER" if is_winner else ""
         
-        summary_parts.append(f"{emoji} **Player {player_num}** - {player_name}: Tile {tile_num}{winner_text}")
+        # Check if player has forfeited
+        forfeit_text = " FORFEIT/QUIT" if user_id in forfeited_players else ""
+        
+        # Format: "Player X / Character Name / Username: Tile Y" (exactly as shown in image)
+        summary_parts.append(f"{emoji} Player {player_num} / {player_name} / {username}: Tile {tile_num}{winner_text}{forfeit_text}")
     
     return "\n".join(summary_parts)
 

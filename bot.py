@@ -40,6 +40,9 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+
+# Note: LOG_LEVEL is read before TEST_MODE is determined, so we read it directly here
+# It will be re-read with mode support after TEST_MODE is set
 logging.basicConfig(
     level=os.getenv("TFBOT_LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -365,6 +368,8 @@ from tfbot.roleplay import RoleplayCog, add_roleplay_cog
 from tfbot.interactions import InteractionContextAdapter
 from tfbot.utils import (
     float_from_env,
+    get_channel_id,
+    get_setting,
     int_from_env,
     is_admin,
     member_profile_name,
@@ -379,41 +384,140 @@ if TYPE_CHECKING:
     from tfbot.games import GameBoardManager
 
 
-BOT_MODE = os.getenv("TFBOT_MODE", "classic").lower()
-TF_CHANNEL_ID = int_from_env("TFBOT_CHANNEL_ID", 0)
-GACHA_CHANNEL_ID = int_from_env("TFBOT_GACHA_CHANNEL_ID", 0)
+# Read TFBOT_TEST flag to determine mode
+# If NOT DEFINED (missing/blank) → None → Backward compatible (use current format)
+# If TFBOT_TEST=YES → True → Use _TEST channels
+# If TFBOT_TEST=NO → False → Use _LIVE channels
+TFBOT_TEST_RAW = os.getenv("TFBOT_TEST", "").strip().upper()
+if not TFBOT_TEST_RAW:
+    TEST_MODE: Optional[bool] = None  # Backward compatible
+elif TFBOT_TEST_RAW in ("YES", "TRUE", "1", "ON"):
+    TEST_MODE = True  # TEST mode
+elif TFBOT_TEST_RAW in ("NO", "FALSE", "0", "OFF"):
+    TEST_MODE = False  # LIVE mode
+else:
+    # Invalid value, default to backward compatible
+    logger.warning("Invalid TFBOT_TEST value '%s', defaulting to backward compatible mode", TFBOT_TEST_RAW)
+    TEST_MODE = None
+
+BOT_MODE = get_setting("TFBOT_MODE", "classic", TEST_MODE).lower()
+TF_CHANNEL_ID = get_channel_id("TFBOT_CHANNEL_ID", 0, TEST_MODE)
+GACHA_CHANNEL_ID = get_channel_id("TFBOT_GACHA_CHANNEL_ID", 0, TEST_MODE)
 GACHA_ENABLED = GACHA_CHANNEL_ID > 0
 CLASSIC_ENABLED = BOT_MODE != "gacha" and TF_CHANNEL_ID > 0
-SUBMISSION_CHANNEL_ID = int_from_env("TFBOT_SUBMISSION_CHANNEL_ID", 0)
+SUBMISSION_CHANNEL_ID = get_channel_id("TFBOT_SUBMISSION_CHANNEL_ID", 0, TEST_MODE)
 SUBMISSION_COMMANDS: set[str] = {"submit", "mirror", "synch"}
 
 if BOT_MODE == "gacha" and not GACHA_ENABLED:
     raise RuntimeError("TFBOT_GACHA_CHANNEL_ID is required when running in gacha mode.")
 
-CHARACTER_INFO_FORUM_CHANNEL_ID = int_from_env("TF_CHARACTER_INFO_FORUM_CHANNEL_ID", 0)
+CHARACTER_INFO_FORUM_CHANNEL_ID = get_channel_id("TF_CHARACTER_INFO_FORUM_CHANNEL_ID", 0, TEST_MODE)
 CHARACTER_INFO_FORUM_ENABLED = CHARACTER_INFO_FORUM_CHANNEL_ID > 0
 CHARACTER_INFO_FORUM_ACTION_DELAY = 0.75
 if not CLASSIC_ENABLED and not GACHA_ENABLED:
     raise RuntimeError("Configure at least TFBOT_CHANNEL_ID or TFBOT_GACHA_CHANNEL_ID.")
-TF_HISTORY_CHANNEL_ID = int_from_env("TFBOT_HISTORY_CHANNEL_ID", 1432196317722972262)
-TF_ARCHIVE_CHANNEL_ID = int_from_env("TFBOT_ARCHIVE_CHANNEL_ID", 0)
-TFBOT_NAME = os.getenv("TFBOT_NAME", "Bot").strip() or "Bot"
-TFBOT_VERSION = os.getenv("TFBOT_VERSION", "1.0.0").strip() or "1.0.0"
-TF_STATE_FILE = Path(os.getenv("TFBOT_STATE_FILE", "tf_state.json"))
-TF_STATS_FILE = Path(os.getenv("TFBOT_STATS_FILE", "tf_stats.json"))
-TF_REROLL_FILE = Path(os.getenv("TFBOT_REROLL_FILE", "tf_reroll.json"))
-ROLEPLAY_FORUM_POST_ID = int_from_env("TFBOT_RP_FORUM_POST_ID", 0)
-ROLEPLAY_STATE_FILE = Path(os.getenv("TFBOT_RP_STATE_FILE", "rp_forum_state.json"))
-GAME_FORUM_CHANNEL_ID = int_from_env("TFBOT_GAME_FORUM_CHANNEL_ID", 0)
-GAME_DM_CHANNEL_ID = int_from_env("TFBOT_GAME_DM_CHANNEL_ID", 0)
+TF_HISTORY_CHANNEL_ID = get_channel_id("TFBOT_HISTORY_CHANNEL_ID", 1432196317722972262, TEST_MODE)
+TF_ARCHIVE_CHANNEL_ID = get_channel_id("TFBOT_ARCHIVE_CHANNEL_ID", 0, TEST_MODE)
+TFBOT_NAME = get_setting("TFBOT_NAME", "Bot", TEST_MODE) or "Bot"
+TFBOT_VERSION = get_setting("TFBOT_VERSION", "1.0.0", TEST_MODE) or "1.0.0"
+_state_file_setting = os.getenv("TFBOT_STATE_FILE", "vn_states/tf_state.json").strip()
+_state_path = Path(_state_file_setting)
+TF_STATE_FILE = (_state_path if _state_path.is_absolute() else (BASE_DIR / _state_path)).resolve()
+
+_stats_file_setting = os.getenv("TFBOT_STATS_FILE", "vn_states/tf_stats.json").strip()
+_stats_path = Path(_stats_file_setting)
+TF_STATS_FILE = (_stats_path if _stats_path.is_absolute() else (BASE_DIR / _stats_path)).resolve()
+
+_reroll_file_setting = os.getenv("TFBOT_REROLL_FILE", "vn_states/tf_reroll.json").strip()
+_reroll_path = Path(_reroll_file_setting)
+TF_REROLL_FILE = (_reroll_path if _reroll_path.is_absolute() else (BASE_DIR / _reroll_path)).resolve()
+
+ROLEPLAY_FORUM_POST_ID = get_channel_id("TFBOT_RP_FORUM_POST_ID", 0, TEST_MODE)
+_rp_state_file_setting = os.getenv("TFBOT_RP_STATE_FILE", "vn_states/rp_forum_state.json").strip()
+_rp_state_path = Path(_rp_state_file_setting)
+ROLEPLAY_STATE_FILE = (_rp_state_path if _rp_state_path.is_absolute() else (BASE_DIR / _rp_state_path)).resolve()
+GAME_FORUM_CHANNEL_ID = get_channel_id("TFBOT_GAME_FORUM_CHANNEL_ID", 0, TEST_MODE)
+GAME_DM_CHANNEL_ID = get_channel_id("TFBOT_GAME_DM_CHANNEL_ID", 0, TEST_MODE)
 GAME_CONFIG_FILE = Path(os.getenv("TFBOT_GAME_CONFIG_FILE", "games/game_config.json"))
+
+
+def _migrate_state_files_to_vn_states() -> None:
+    """Migrate existing state files from root directory to vn_states/ folder."""
+    vn_states_dir = BASE_DIR / "vn_states"
+    vn_states_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Files to migrate: (old_path, new_path)
+    files_to_migrate = [
+        (BASE_DIR / "tf_state.json", vn_states_dir / "tf_state.json"),
+        (BASE_DIR / "tf_stats.json", vn_states_dir / "tf_stats.json"),
+        (BASE_DIR / "tf_reroll.json", vn_states_dir / "tf_reroll.json"),
+        (BASE_DIR / "rp_forum_state.json", vn_states_dir / "rp_forum_state.json"),
+        (BASE_DIR / "transform_replies.json", vn_states_dir / "transform_replies.json"),
+        (BASE_DIR / "tf_backgrounds.json", vn_states_dir / "tf_backgrounds.json"),
+        (BASE_DIR / "tf_outfits.json", vn_states_dir / "tf_outfits.json"),
+    ]
+    
+    # Migrate games/states/ directory
+    old_games_states = BASE_DIR / "games" / "states"
+    new_games_states = vn_states_dir / "games"
+    
+    migrated_count = 0
+    if old_games_states.exists() and old_games_states.is_dir():
+        if not new_games_states.exists():
+            new_games_states.mkdir(parents=True, exist_ok=True)
+            # Move all files from old location to new location
+            for old_file in old_games_states.glob("*"):
+                if old_file.is_file():
+                    new_file = new_games_states / old_file.name
+                    if not new_file.exists():
+                        try:
+                            old_file.rename(new_file)
+                            migrated_count += 1
+                            logger.info("Migrated game state file: %s -> %s", old_file.name, new_file)
+                        except Exception as exc:
+                            logger.warning("Failed to migrate game state file %s: %s", old_file, exc)
+            # Try to remove old directory if empty
+            try:
+                try:
+                    if not any(old_games_states.iterdir()):
+                        old_games_states.rmdir()
+                        logger.info("Removed empty old games/states directory")
+                except Exception:
+                    pass
+            except Exception:
+                pass  # Ignore errors when trying to remove old directory
+        else:
+            logger.debug("vn_states/games already exists, skipping games/states migration")
+    
+    # Migrate individual state files
+    for old_path, new_path in files_to_migrate:
+        if old_path.exists() and old_path.is_file():
+            if not new_path.exists():
+                try:
+                    # Ensure parent directory exists
+                    new_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_path.rename(new_path)
+                    migrated_count += 1
+                    logger.info("Migrated state file: %s -> %s", old_path.name, new_path)
+                except Exception as exc:
+                    logger.warning("Failed to migrate state file %s: %s", old_path, exc)
+            else:
+                logger.debug("State file %s already exists in vn_states/, skipping migration", old_path.name)
+    
+    if migrated_count > 0:
+        logger.info("State file migration complete: %d file(s) moved to vn_states/", migrated_count)
+
+
+# Run migration on startup
+_migrate_state_files_to_vn_states()
 GAME_ASSETS_DIR = path_from_env("TFBOT_GAME_ASSETS_DIR") or Path("games/assets")
 # Gameboard enable/disable toggle (like INANIMATE_ENABLED pattern)
-GAMEBOARD_ENABLED = os.getenv("TFBOT_GAMEBOARD_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+GAMEBOARD_ENABLED = get_setting("TFBOT_GAMEBOARD_ENABLED", "false", TEST_MODE).lower() in ("true", "1", "yes", "on")
 GAME_BOARD_ENABLED = GAMEBOARD_ENABLED and GAME_FORUM_CHANNEL_ID > 0
-MESSAGE_STYLE = os.getenv(
+MESSAGE_STYLE = get_setting(
     "TFBOT_MESSAGE_STYLE",
     "vn" if GACHA_ENABLED else "classic",
+    TEST_MODE,
 ).lower()
 _DEFAULT_INANIMATE_MINUTES = (10,)
 _DEFAULT_SPECIAL_MINUTES = (60,)
@@ -440,10 +544,10 @@ def _parse_duration_minutes(raw_value: Optional[str], fallback: Sequence[int]) -
     return tuple(parsed or fallback)
 
 
-def _duration_options_from_env(var_name: str, fallback: Sequence[int], legacy_var: Optional[str] = None) -> Tuple[int, ...]:
-    raw_value = os.getenv(var_name)
-    if raw_value is None and legacy_var:
-        raw_value = os.getenv(legacy_var)
+def _duration_options_from_env(var_name: str, fallback: Sequence[int], legacy_var: Optional[str] = None, test_mode: Optional[bool] = None) -> Tuple[int, ...]:
+    raw_value = get_setting(var_name, "", test_mode)
+    if not raw_value and legacy_var:
+        raw_value = get_setting(legacy_var, "", test_mode)
     return _parse_duration_minutes(raw_value, fallback)
 
 
@@ -451,14 +555,17 @@ TF_INANIMATE_DURATION_OPTIONS = _duration_options_from_env(
     "TF_INANIMATE_DURATION",
     fallback=_DEFAULT_INANIMATE_MINUTES,
     legacy_var="TF_INNANIMATE_DURATION",
+    test_mode=TEST_MODE,
 )
 TF_SPECIAL_DURATION_OPTIONS = _duration_options_from_env(
     "TF_SPECIAL_DURATION",
     fallback=_DEFAULT_SPECIAL_MINUTES,
+    test_mode=TEST_MODE,
 )
 TF_GENERIC_DURATION_OPTIONS = _duration_options_from_env(
     "TF_GENERIC_DURATION",
     fallback=_DEFAULT_GENERIC_MINUTES,
+    test_mode=TEST_MODE,
 )
 
 
@@ -495,7 +602,7 @@ REQUIRED_GUILD_PERMISSIONS = {
     "send_messages": "Send Messages (needed to respond in channels)",
     "embed_links": "Embed Links (history channel logging)",
 }
-MAGIC_EMOJI_NAME = os.getenv("TFBOT_MAGIC_EMOJI_NAME", "magic_emoji")
+MAGIC_EMOJI_NAME = get_setting("TFBOT_MAGIC_EMOJI_NAME", "magic_emoji", TEST_MODE)
 MAGIC_EMOJI_CACHE: Dict[int, str] = {}
 def _parse_special_form_names(raw: str) -> tuple[str, ...]:
     tokens = [token.strip() for token in re.split(r"[;,]", raw or "") if token.strip()]
@@ -504,7 +611,7 @@ def _parse_special_form_names(raw: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-SPECIAL_REROLL_FORMS = _parse_special_form_names(os.getenv("TFBOT_SPECIAL_FORMS", "Ball,Narrator"))
+SPECIAL_REROLL_FORMS = _parse_special_form_names(get_setting("TFBOT_SPECIAL_FORMS", "Ball,Narrator", TEST_MODE))
 ADMIN_ONLY_RANDOM_FORMS = ("syn", "circe")
 CHARACTER_AUTOCOMPLETE_LIMIT = 25
 OUTFIT_AUTOCOMPLETE_LIMIT = 25
@@ -595,7 +702,7 @@ def _parse_featured_weight_map(raw: str) -> Dict[str, float]:
     return weights
 
 
-FEATURED_TF_WEIGHTS = _parse_featured_weight_map(os.getenv("TFBOT_FEATURED_TF_WEIGHTS", ""))
+FEATURED_TF_WEIGHTS = _parse_featured_weight_map(get_setting("TFBOT_FEATURED_TF_WEIGHTS", "", TEST_MODE))
 
 
 configure_state(state_file=TF_STATE_FILE, stats_file=TF_STATS_FILE, reroll_file=TF_REROLL_FILE)
@@ -603,10 +710,10 @@ tf_stats.update(load_stats_from_disk())
 reroll_cooldowns.update(load_reroll_cooldowns_from_disk())
 
 INANIMATE_DATA_FILE = Path(os.getenv("TFBOT_INANIMATE_FILE", "tf_inanimate.json")).expanduser()
-INANIMATE_TF_CHANCE = float(os.getenv("TFBOT_INANIMATE_CHANCE", "0"))
-ADMIN_PROTECTION_ENABLED = os.getenv("TFBOT_ADMIN_PROTECTION_ENABLED", "false").lower() in ("true", "1", "yes", "on")
-SPECIAL_CHARACTERS_ADMIN_ONLY = os.getenv("TFBOT_SPECIAL_CHARACTERS_ADMIN_ONLY", "true").lower() in ("true", "1", "yes", "on")
-INANIMATE_ENABLED = os.getenv("TFBOT_INANIMATE_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+INANIMATE_TF_CHANCE = float(get_setting("TFBOT_INANIMATE_CHANCE", "0", TEST_MODE))
+ADMIN_PROTECTION_ENABLED = get_setting("TFBOT_ADMIN_PROTECTION_ENABLED", "false", TEST_MODE).lower() in ("true", "1", "yes", "on")
+SPECIAL_CHARACTERS_ADMIN_ONLY = get_setting("TFBOT_SPECIAL_CHARACTERS_ADMIN_ONLY", "true", TEST_MODE).lower() in ("true", "1", "yes", "on")
+INANIMATE_ENABLED = get_setting("TFBOT_INANIMATE_ENABLED", "true", TEST_MODE).lower() in ("true", "1", "yes", "on")
 BLOCK_INANIMATE_EXCEPT_SPECIAL = os.getenv("TFBOT_BLOCK_INANIMATE_EXCEPT_SPECIAL", "false").lower() in ("true", "1", "yes", "on")
 
 
@@ -1157,7 +1264,7 @@ def _load_inanimate_forms() -> Tuple[Dict[str, object], ...]:
 
 INANIMATE_FORMS = _load_inanimate_forms()
 
-CHARACTER_DATA_FILE_SETTING = os.getenv("TFBOT_CHARACTERS_FILE", "").strip()
+CHARACTER_DATA_FILE_SETTING = os.getenv("TFBOT_CHARACTERS_FILE", "").strip().split("#")[0].strip()
 _CHARACTER_AVATAR_ROOT_SETTING = os.getenv("TFBOT_AVATAR_ROOT", "").strip()
 
 _history_refresh_task: Optional[asyncio.Task] = None
@@ -1364,11 +1471,44 @@ _CHARACTER_DIRECTORY_CACHE_EXPIRY: float = 0.0
 _CHARACTER_INFO_FORUM_LOCK = asyncio.Lock()
 _THREAD_TITLE_PATTERN = re.compile(r"^(?P<name>.+?)\s*\((?P<folder>.+?)\)$")
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-if not DISCORD_TOKEN:
-    raise RuntimeError("Missing DISCORD_TOKEN. Set it in your environment or .env file.")
+def get_discord_token(test_mode: Optional[bool]) -> str:
+    """
+    Get Discord token with mode-specific support and fallback.
+    
+    Behavior:
+    - If test_mode is None: Use DISCORD_TOKEN (backward compatible)
+    - If test_mode=True: Use DISCORD_TOKEN_TEST if set (non-blank), otherwise fallback to DISCORD_TOKEN
+    - If test_mode=False: Use DISCORD_TOKEN_LIVE if set (non-blank), otherwise fallback to DISCORD_TOKEN
+    
+    Mode-specific tokens override the default if they are set (non-blank).
+    If mode-specific token is blank/not set, falls back to DISCORD_TOKEN.
+    
+    Returns:
+        Discord token string
+        
+    Raises:
+        RuntimeError if no token is found after fallback
+    """
+    if test_mode is None:
+        # Backward compatibility: Use base token only
+        token = os.getenv("DISCORD_TOKEN", "").strip().split("#")[0].strip()
+    elif test_mode:
+        # TEST mode: Use DISCORD_TOKEN_TEST if set, otherwise fallback to DISCORD_TOKEN
+        token = (os.getenv("DISCORD_TOKEN_TEST", "").strip().split("#")[0].strip() or 
+                 os.getenv("DISCORD_TOKEN", "").strip().split("#")[0].strip())
+    else:
+        # LIVE mode: Use DISCORD_TOKEN_LIVE if set, otherwise fallback to DISCORD_TOKEN
+        token = (os.getenv("DISCORD_TOKEN_LIVE", "").strip().split("#")[0].strip() or 
+                 os.getenv("DISCORD_TOKEN", "").strip().split("#")[0].strip())
+    
+    if not token:
+        raise RuntimeError("Missing Discord token. Set DISCORD_TOKEN or mode-specific token (DISCORD_TOKEN_LIVE/DISCORD_TOKEN_TEST) in your environment or .env file.")
+    
+    return token
 
-TF_CHANCE = float(os.getenv("TFBOT_CHANCE", "0.10"))
+DISCORD_TOKEN = get_discord_token(TEST_MODE)
+
+TF_CHANCE = float(get_setting("TFBOT_CHANCE", "0.10", TEST_MODE))
 TF_CHANCE = max(0.0, min(1.0, TF_CHANCE))
 
 intents = discord.Intents.default()
@@ -1381,7 +1521,7 @@ class TFBot(commands.Bot):
         await setup_bot_extensions()
 
 
-bot = TFBot(command_prefix=os.getenv("TFBOT_PREFIX", "!"), intents=intents, case_insensitive=True)
+bot = TFBot(command_prefix=get_setting("TFBOT_PREFIX", "!", TEST_MODE), intents=intents, case_insensitive=True)
 ROLEPLAY_COG: Optional[RoleplayCog] = None
 GAME_BOARD_MANAGER: Optional["GameBoardManager"] = None
 _SYNCED_APP_COMMAND_GUILDS: set[int] = set()
@@ -1681,7 +1821,7 @@ def _load_character_context() -> Dict[str, str]:
 
 CHARACTER_CONTEXT = _load_character_context()
 
-_REPLY_LOG_SETTING = os.getenv("TFBOT_REPLY_LOG", "transform_replies.json").strip()
+_REPLY_LOG_SETTING = os.getenv("TFBOT_REPLY_LOG", "vn_states/transform_replies.json").strip()
 if _REPLY_LOG_SETTING:
     _reply_path = Path(_REPLY_LOG_SETTING)
     if not _reply_path.is_absolute():
@@ -1689,7 +1829,7 @@ if _REPLY_LOG_SETTING:
     else:
         REPLY_LOG_FILE = _reply_path.resolve()
 else:
-    REPLY_LOG_FILE = (BASE_DIR / "transform_replies.json").resolve()
+    REPLY_LOG_FILE = (BASE_DIR / "vn_states/transform_replies.json").resolve()
 
 
 def _load_reply_log() -> Dict[int, ReplyContext]:
@@ -2923,15 +3063,51 @@ async def on_ready():
     await ensure_state_restored()
     await _sync_application_commands_for_known_guilds()
     logger.info("Logged in as %s (id=%s)", bot.user, bot.user.id if bot.user else "unknown")
+    
+    # Log TFBOT_TEST mode status
+    if TEST_MODE is None:
+        logger.info("TFBOT_TEST mode: NOT DEFINED (backward compatible - using current format)")
+    elif TEST_MODE:
+        logger.info("TFBOT_TEST mode: YES (TEST mode - using _TEST channels)")
+    else:
+        logger.info("TFBOT_TEST mode: NO (LIVE mode - using _LIVE channels)")
+    
     logger.info("TF chance set to %.0f%%", TF_CHANCE * 100)
     logger.info("Message style: %s", MESSAGE_STYLE.upper())
+    
+    # Log all monitored channels
+    monitored_channels = []
     if TF_CHANNEL_ID > 0:
         status = "enabled" if CLASSIC_ENABLED else "disabled"
         logger.info("Primary channel (%s): %s", status, TF_CHANNEL_ID)
+        monitored_channels.append(f"TF: {TF_CHANNEL_ID}")
     elif CLASSIC_ENABLED:
         logger.warning("No primary channel configured.")
+    if GACHA_CHANNEL_ID > 0:
+        logger.info("Gacha channel: %s", GACHA_CHANNEL_ID)
+        monitored_channels.append(f"Gacha: {GACHA_CHANNEL_ID}")
     if GACHA_MANAGER is not None:
         logger.info("Gacha channel: %s", GACHA_MANAGER.channel_id)
+    if TF_HISTORY_CHANNEL_ID > 0:
+        monitored_channels.append(f"History: {TF_HISTORY_CHANNEL_ID}")
+    if TF_ARCHIVE_CHANNEL_ID > 0:
+        monitored_channels.append(f"Archive: {TF_ARCHIVE_CHANNEL_ID}")
+    if SUBMISSION_CHANNEL_ID > 0:
+        monitored_channels.append(f"Submission: {SUBMISSION_CHANNEL_ID}")
+    if CHARACTER_INFO_FORUM_CHANNEL_ID > 0:
+        monitored_channels.append(f"Character Info Forum: {CHARACTER_INFO_FORUM_CHANNEL_ID}")
+    if ROLEPLAY_FORUM_POST_ID > 0:
+        monitored_channels.append(f"RP Forum Post: {ROLEPLAY_FORUM_POST_ID}")
+    if GAME_FORUM_CHANNEL_ID > 0:
+        monitored_channels.append(f"Game Forum: {GAME_FORUM_CHANNEL_ID}")
+    if GAME_DM_CHANNEL_ID > 0:
+        monitored_channels.append(f"Game DM: {GAME_DM_CHANNEL_ID}")
+    
+    if monitored_channels:
+        logger.info("Monitored channels: %s", ", ".join(monitored_channels))
+    else:
+        logger.warning("No channels configured - bot will not respond to messages")
+    
     await log_guild_permissions()
     await log_channel_access()
     schedule_history_refresh()
@@ -3082,7 +3258,7 @@ async def reroll_command(ctx: commands.Context, *, args: str = ""):
     
     # Check if this is a game thread - if so, route to gameboard manager
     if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread) and GAME_BOARD_MANAGER.is_game_thread(ctx.channel):
-        game_state = GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
+        game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
         if game_state:
             # Parse member from args if provided (supports @user OR character_name)
             target_member = None
@@ -3100,8 +3276,8 @@ async def reroll_command(ctx: commands.Context, *, args: str = ""):
                     # Not a mention, treat as character name token
                     token = args_stripped
             
-            # Route to gameboard reroll
-            await GAME_BOARD_MANAGER.command_reroll(ctx, member=target_member, token=token)
+            # Route to gameboard reroll (no forced_character support in this path - use prefix_reroll_35 for that)
+            await GAME_BOARD_MANAGER.command_reroll(ctx, member=target_member, token=token, forced_character=None)
             return None
     
     roleplay_dm_override = (
@@ -4910,6 +5086,27 @@ async def on_message(message: discord.Message):
 
     if ctx.command:
         if channel_allowed or command_allowed_extra:
+            if is_game_thread and GAME_BOARD_MANAGER:
+                game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
+                if game_state:
+                    is_gm = GAME_BOARD_MANAGER._is_gm(message.author, game_state)
+                    if not is_gm:
+                        player = game_state.players.get(message.author.id)
+                        has_character = bool(player and player.character_name)
+                        if not has_character:
+                            try:
+                                await message.delete()
+                            except discord.HTTPException:
+                                pass
+                            return None
+                        allowed_player_commands = {"dice", "gamequit", "help", "rules", "players"}
+                        command_name = ctx.command.qualified_name.lower()
+                        if command_name not in allowed_player_commands:
+                            try:
+                                await message.delete()
+                            except discord.HTTPException:
+                                pass
+                            return None
             command_invoked = True
             logger.debug(
                 "Invoking command %s by %s in channel %s",
@@ -4940,12 +5137,94 @@ async def on_message(message: discord.Message):
             and GAME_BOARD_MANAGER.is_game_thread(message.channel)
         )
         if is_game_thread:
-            # Invalid command in game thread - don't process as VN message
-            # This prevents narrator from reverting to VN character on typos
-            return None
+            # Check if this is an invalid command for a regular player
+            # Extract command name (first word after !, case-insensitive)
+            command_name = None
+            parts = message.content.strip().split()
+            if parts:
+                command_name = parts[0][1:].lower() if parts[0].startswith('!') else None
+            
+            # Allowed player commands in gameboard mode
+            ALLOWED_PLAYER_COMMANDS = {'dice', 'rules', 'gamequit', 'help', 'players'}
+            
+            if command_name:
+                # Get game state to check if user is GM/admin
+                # Access _active_games directly (same pattern as used elsewhere in on_message)
+                thread_id = message.channel.id
+                game_state = GAME_BOARD_MANAGER._active_games.get(thread_id) if hasattr(GAME_BOARD_MANAGER, '_active_games') else None
+                if not game_state and isinstance(message.channel, discord.Thread):
+                    # Try to detect and load existing game thread
+                    game_state = await GAME_BOARD_MANAGER._detect_and_load_game_thread(message.channel)
+                
+                if game_state:
+                    is_gm = GAME_BOARD_MANAGER._is_gm(message.author, game_state)
+                    is_admin_user = is_admin(message.author)
+                    if not is_gm:
+                        player = game_state.players.get(message.author.id)
+                        has_character = bool(player and player.character_name)
+                        if not has_character:
+                            try:
+                                await message.delete()
+                            except discord.HTTPException:
+                                pass
+                            return None
+                    
+                    # If not GM/admin and command is not allowed, delete message immediately
+                    # This applies even when lock is held (invalid commands should never be queued)
+                    if not is_gm and not is_admin_user and command_name not in ALLOWED_PLAYER_COMMANDS:
+                        try:
+                            await message.delete()
+                            logger.debug("Deleted invalid player command '%s' from %s in gameboard", 
+                                       command_name, message.author.id)
+                        except discord.HTTPException:
+                            pass  # Message might already be deleted
+                        return None  # Handled, don't process further
+                    
+                    # Allow !say command for GM in gameboard mode
+                    # Check if this is !say command and user is GM
+                    if command_name == 'say':
+                        is_gm = GAME_BOARD_MANAGER._is_gm(message.author, game_state)
+                        is_admin_user = is_admin(message.author)
+                        if is_gm or is_admin_user:
+                            # Allow !say to proceed for GM/admin - continue processing
+                            # Don't return None - let the command handler process it
+                            pass
+                        else:
+                            # Non-GM trying to use !say - block it
+                            try:
+                                await message.delete()
+                                logger.debug("Deleted !say command from non-GM %s in gameboard", message.author.id)
+                            except discord.HTTPException:
+                                pass
+                            return None
+                    # For other commands, the check at line 4968 already handled invalid commands
+                    # Allowed commands (dice, rules, gamequit, help) and GM commands can proceed
 
     if command_invoked:
+        # Command already invoked at line 4920
+        # GM check for !say in gameboard already handled at lines 4977-4993
+        # Return None to prevent further processing (same as 4.5 behavior)
         return None
+
+    # CRITICAL: Strict channel filtering for complete independence between test/live bots
+    # If message is in a guild and we have allowed channels, reject messages from other mode's channels
+    # This ensures test and live bots running simultaneously completely ignore each other
+    if message.guild and allowed_ids:
+        if not _channel_matches_allowed(message.channel, allowed_ids):
+            # Check if this is a game thread from active mode
+            is_game_thread_check = (
+                GAME_BOARD_MANAGER is not None
+                and isinstance(message.channel, discord.Thread)
+                and GAME_BOARD_MANAGER.is_game_thread(message.channel)
+            )
+            if not is_game_thread_check:
+                # Channel not in active mode - ignore completely (ensures test/live bots don't interact)
+                logger.debug(
+                    "Ignoring message from channel %s (not in active mode's allowed channels: %s)",
+                    getattr(message.channel, "id", None),
+                    ", ".join(str(cid) for cid in sorted(allowed_ids)),
+                )
+                return None
 
     # Check for game thread FIRST (before other systems)
     # CRITICAL: Game threads use isolated game state, never global active_transformations
@@ -4989,9 +5268,11 @@ async def on_message(message: discord.Message):
     if message.guild and message.guild.owner_id == message.author.id and not is_roleplay_forum_post:
         logger.debug("Ignoring message %s from server owner %s", message.id, message.author.id)
         return None
+    # CRITICAL: Strict channel filtering - reject messages from channels not in active mode
+    # This ensures complete independence between test/live bots running simultaneously
     if message.guild and allowed_ids and not _channel_matches_allowed(message.channel, allowed_ids) and not is_game_thread_msg:
-        logger.info(
-            "Skipping message %s: channel %s is not in the monitored TF/RP channels %s.",
+        logger.debug(
+            "Skipping message %s: channel %s is not in the active mode's monitored channels %s.",
             message.id,
             channel_id,
             ", ".join(str(cid) for cid in sorted(allowed_ids)),
@@ -5270,15 +5551,54 @@ async def prefix_reroll_35(ctx: commands.Context, *, args: str = ""):
         await ctx.reply("This command can only be used inside a server.", mention_author=False)
         return None
     
-    # Check if this is a game thread - if so, apply game-specific restrictions
+    # Initialize game_state to None (will be set if in gameboard mode)
     game_state = None
+    
+    # CRITICAL: Check gameboard mode FIRST, before any cooldown checks
+    # In gameboard mode, only GM can reroll, and they have unlimited rerolls
     if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread) and GAME_BOARD_MANAGER.is_game_thread(ctx.channel):
-        game_state = GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
+        game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
         if game_state:
-            # In game threads, only GM can reroll
+            # In gameboard mode, only GM can reroll - block everyone else
             if not GAME_BOARD_MANAGER._is_gm(author, game_state):
-                await ctx.reply("Only the GM can reroll characters in game threads.", mention_author=False)
+                await ctx.reply("Only the GM can reroll characters in gameboard mode.", mention_author=False)
                 return None
+            
+            # GM is using reroll in gameboard - parse args and route to gameboard reroll (no cooldown)
+            # Parse member from args if provided (supports @user OR character_name)
+            # Support formats: !reroll tori, !reroll tori Kiyoshi, !reroll @user, !reroll @user Kiyoshi
+            target_member = None
+            token = None
+            forced_character_token = None
+            
+            if args:
+                args_stripped = args.strip()
+                import re
+                
+                # Split args into tokens
+                tokens = args_stripped.split()
+                if not tokens:
+                    tokens = [args_stripped]
+                
+                # Check if first token is a mention
+                mention_match = re.search(r'<@!?(\d+)>', tokens[0])
+                if mention_match:
+                    member_id = int(mention_match.group(1))
+                    if ctx.guild:
+                        target_member = ctx.guild.get_member(member_id)
+                    # Remaining tokens are the forced character name
+                    if len(tokens) > 1:
+                        forced_character_token = ' '.join(tokens[1:])
+                else:
+                    # First token is character name/partial name for target player
+                    token = tokens[0]
+                    # Remaining tokens are the forced character name
+                    if len(tokens) > 1:
+                        forced_character_token = ' '.join(tokens[1:])
+            
+            # Route to gameboard reroll (GM has unlimited rerolls, no cooldown)
+            await GAME_BOARD_MANAGER.command_reroll(ctx, member=target_member, token=token, forced_character=forced_character_token)
+            return None
     
     author_is_admin = is_admin(author)
 
@@ -5746,7 +6066,14 @@ async def _handle_pillow_command(ctx: commands.Context, target: str) -> None:
             mention_author=False,
         )
         return
-
+    
+    # CRITICAL: Block !pillow in gameboard mode
+    if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread):
+        game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
+        if game_state:
+            await ctx.reply("❌ `!pillow` is disabled in gameboard mode.", mention_author=False)
+            return
+    
     await ensure_state_restored()
 
     guild_channel = ctx.channel if isinstance(ctx.channel, discord.abc.GuildChannel) else None
@@ -6383,6 +6710,45 @@ async def prefix_debug_command(ctx: commands.Context) -> None:
 
 
 
+@bot.command(name="pswap")
+@commands.guild_only()
+@guard_prefix_command_channel
+async def prefix_pswap_command(ctx: commands.Context, *, args: str = "") -> None:
+    """Permanent swap characters between two players (GM only, gameboard only).
+    
+    Usage: !pswap @user1 @user2
+    Or: !pswap character1 character2
+    """
+    # Check if this is a game thread - if so, delegate to gameboard manager
+    if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread) and GAME_BOARD_MANAGER.is_game_thread(ctx.channel):
+        # Parse arguments for gameboard mode (supports @user1 @user2 OR character1 character2)
+        tokens = [token for token in args.split() if token.strip()]
+        member1 = None
+        member2 = None
+        token1 = None
+        token2 = None
+        
+        if len(tokens) >= 2:
+            token1 = tokens[0]
+            token2 = tokens[1]
+            # Try to resolve as members first
+            user_id1 = _extract_user_id_from_token(tokens[0])
+            if user_id1 and ctx.guild:
+                member1 = ctx.guild.get_member(user_id1)
+            user_id2 = _extract_user_id_from_token(tokens[1])
+            if user_id2 and ctx.guild:
+                member2 = ctx.guild.get_member(user_id2)
+        
+        if len(tokens) >= 2:
+            await GAME_BOARD_MANAGER.command_pswap(ctx, member1=member1, member2=member2, token1=token1, token2=token2)
+        else:
+            await ctx.reply("Usage: `!pswap @user1 @user2` or `!pswap character1 character2`", mention_author=False)
+        return
+    
+    # pswap is gameboard only
+    await ctx.reply("`!pswap` can only be used in gameboard threads.", mention_author=False)
+
+
 @bot.command(name="swap")
 @commands.guild_only()
 @guard_prefix_command_channel
@@ -6892,6 +7258,37 @@ async def prefix_loadgame_command(ctx: commands.Context, *, state_file: str = ""
         await GAME_BOARD_MANAGER.command_loadgame(ctx, state_file=state_file)
 
 
+@bot.command(name="gamequit")
+@commands.guild_only()
+@guard_prefix_command_channel
+async def prefix_gamequit_command(ctx: commands.Context) -> None:
+    """Forfeit the game (player command). Token remains on board but turns are skipped."""
+    if GAME_BOARD_MANAGER:
+        await GAME_BOARD_MANAGER.command_gamequit(ctx)
+
+
+@bot.command(name="players")
+@commands.guild_only()
+@guard_prefix_command_channel
+async def prefix_players_command(ctx: commands.Context) -> None:
+    """Show gameboard player order/status list."""
+    if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread) and GAME_BOARD_MANAGER.is_game_thread(ctx.channel):
+        await GAME_BOARD_MANAGER.command_players(ctx)
+    return
+
+
+@bot.command(name="bg_list")
+async def prefix_bg_list(ctx: commands.Context):
+    """List available backgrounds (DMs the GM)."""
+    # Check if this is a game thread first
+    if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread) and GAME_BOARD_MANAGER.is_game_thread(ctx.channel):
+        # Game thread - use game-specific bg list command
+        await GAME_BOARD_MANAGER.command_bg_list(ctx)
+        return
+    
+    # Not in game thread - ignore (VN mode handles this differently)
+    return
+
 @bot.command(name="bg")
 async def prefix_bg_35(ctx: commands.Context, *, selection: str = ""):
     """3.5 version of bg command."""
@@ -6902,26 +7299,11 @@ async def prefix_bg_35(ctx: commands.Context, *, selection: str = ""):
             # Show game-specific background list
             await GAME_BOARD_MANAGER.command_bg_list(ctx)
             return
-        # Parse game bg command: !bg @user <id> or !bg all <id>
-        parts = selection.strip().split(maxsplit=1)
-        if len(parts) == 2:
-            target_str, bg_id = parts
-            # Try to parse as member mention or "all"
-            member = None
-            if target_str.lower() != "all":
-                # Try to extract member from mention
-                from discord.ext.commands import MemberConverter
-                try:
-                    member = await MemberConverter().convert(ctx, target_str)
-                except:
-                    pass
-            # If member is None, it means "all" was passed
-            await GAME_BOARD_MANAGER.command_bg(ctx, target=member, bg_id=bg_id)
-            return
-        else:
-            # Invalid format
-            await ctx.reply("Usage: `!bg @user <id>` or `!bg all <id>`. Use `!bg` to list available backgrounds.", mention_author=False)
-            return
+        # Parse game bg command: !bg @user <id> or !bg character_name <id> or !bg all <id>
+        # Pass the full selection string to command_bg so it can resolve character names
+        # command_bg will handle parsing and resolution internally
+        await GAME_BOARD_MANAGER.command_bg(ctx, target=None, bg_id=selection.strip())
+        return
     
     try:
         await ctx.message.delete()
@@ -7091,6 +7473,19 @@ async def prefix_bg_35(ctx: commands.Context, *, selection: str = ""):
         if ctx.guild:
             await ctx.send("I couldn't DM you. Please enable direct messages.", delete_after=10)
 
+
+@bot.command(name="outfit_list")
+@guard_prefix_command_channel
+async def prefix_outfit_list(ctx: commands.Context, *, target: str = ""):
+    """List available outfits for a character or user."""
+    # Check if this is a game thread first
+    if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread) and GAME_BOARD_MANAGER.is_game_thread(ctx.channel):
+        # Game thread - use game-specific outfit list command
+        await GAME_BOARD_MANAGER.command_outfit_list(ctx, target=target.strip() if target else None)
+        return
+    
+    # Not in game thread - ignore (VN mode handles this differently)
+    return
 
 @bot.command(name="outfit")
 @guard_prefix_command_channel
@@ -7272,7 +7667,20 @@ async def prefix_say_35(ctx: commands.Context, *, args: str = ""):
     if not isinstance(actor, discord.Member):
         await ctx.reply("This command can only be used inside a server.", mention_author=False)
         return
-    can_use_command = is_admin(actor) or _actor_has_narrator_power_35(actor)
+    # Check if in gameboard mode - if so, only GM can use !say
+    can_use_command = False
+    if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread):
+        game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
+        if game_state:
+            # In gameboard mode - only GM can use !say
+            can_use_command = GAME_BOARD_MANAGER._is_gm(actor, game_state) or is_admin(actor)
+        else:
+            # Not in gameboard mode - use normal VN mode checks
+            can_use_command = is_admin(actor) or _actor_has_narrator_power_35(actor)
+    else:
+        # Not in game thread - use normal VN mode checks
+        can_use_command = is_admin(actor) or _actor_has_narrator_power_35(actor)
+    
     if not can_use_command:
         await ctx.reply(_privileged_requirement_message("use `!say`"), mention_author=False)
         return
@@ -7286,13 +7694,19 @@ async def prefix_say_35(ctx: commands.Context, *, args: str = ""):
     
     # CRITICAL: Check gameboard states FIRST if in a game thread
     target_state = None
+    gacha_outfit_override = None
     if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread):
-        game_state = GAME_BOARD_MANAGER.get_game_state_for_thread(ctx.channel)
+        game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
         if game_state:
             # Check gameboard player states first
             user_id = _extract_user_id_from_token(target_token)
             if user_id is not None:
                 target_state = game_state.player_states.get(user_id)
+                # Get player's outfit if target is a player in the game
+                if target_state and user_id in game_state.players:
+                    player = game_state.players[user_id]
+                    if player.outfit_name:
+                        gacha_outfit_override = player.outfit_name
             if target_state is None:
                 # Try matching by character name or folder
                 token_variants = _token_variants(target_token)
@@ -7301,10 +7715,20 @@ async def prefix_say_35(ctx: commands.Context, *, args: str = ""):
                         continue
                     if _name_matches_token(state.character_name, target_token):
                         target_state = state
+                        # Get player's outfit if found
+                        if player_id in game_state.players:
+                            player = game_state.players[player_id]
+                            if player.outfit_name:
+                                gacha_outfit_override = player.outfit_name
                         break
                     character_entry = CHARACTER_BY_NAME.get(state.character_name.strip().lower())
                     if character_entry and _character_matches_token(character_entry, target_token):
                         target_state = state
+                        # Get player's outfit if found (use player_id from the loop, not actor.id)
+                        if player_id in game_state.players:
+                            player = game_state.players[player_id]
+                            if player.outfit_name:
+                                gacha_outfit_override = player.outfit_name
                         break
     
     # If not found in gameboard, check global states
@@ -7359,19 +7783,75 @@ async def prefix_say_35(ctx: commands.Context, *, args: str = ""):
     payload: dict = {}
     if MESSAGE_STYLE == "vn":
         character_display_name = _resolve_character_display_name(ctx.guild, target_state.user_id, target_state)
-        vn_file = render_vn_panel(
-            state=target_state,
-            message_content=cleaned_content,
-            character_display_name=character_display_name,
-            original_name=original_name,
-            attachment_id=str(ctx.message.id),
-            formatted_segments=formatted_segments,
-            custom_emoji_images=custom_emoji_images,
-            reply_context=reply_context,
-            selection_scope=selection_scope,
-        )
-        if vn_file:
-            files.append(vn_file)
+        
+        # CRITICAL: Monkey-patch get_selected_background_path for gameboard mode
+        # This ensures !say uses gameboard backgrounds instead of VN backgrounds
+        original_func = None
+        if GAME_BOARD_MANAGER and isinstance(ctx.channel, discord.Thread):
+            game_state = await GAME_BOARD_MANAGER._get_game_state_for_context(ctx)
+            if game_state and target_state and target_state.user_id in game_state.players:
+                player = game_state.players[target_state.user_id]
+                background_path = (
+                    GAME_BOARD_MANAGER._get_game_background_path(player.background_id)
+                    if player.background_id is not None
+                    else None
+                )
+                # Monkey-patch get_selected_background_path to use gameboard background
+                import tfbot.panels as panels_module
+                from tfbot.panels import get_selected_background_path as global_get_bg
+                
+                original_func = panels_module.get_selected_background_path
+                
+                def game_background_getter(user_id: int) -> Optional[Path]:
+                    """Override background lookup to use game-specific background for !say command.
+                    
+                    CRITICAL: This function uses target_state.user_id and player.background_id,
+                    ensuring !say uses the same gameboard background as normal messages.
+                    """
+                    if user_id == target_state.user_id:
+                        # Always use gameboard background for this character
+                        if background_path:
+                            return background_path
+                        # Fallback: if background_path is None, try to get it from player.background_id directly
+                        if player.background_id is not None:
+                            logger.debug("Background path was None in !say monkey-patch, recalculating from player.background_id=%s", 
+                                       player.background_id)
+                            fallback_path = GAME_BOARD_MANAGER._get_game_background_path(player.background_id)
+                            if fallback_path:
+                                return fallback_path
+                            logger.warning("Failed to get background path from player.background_id=%s in !say monkey-patch", 
+                                         player.background_id)
+                        # If still None, don't fall back to VN mode - return None to use default
+                        logger.debug("No gameboard background available for user_id=%s in !say, returning None (will use default)", user_id)
+                        return None
+                    # Fall back to default behavior for other users (shouldn't happen in games)
+                    return global_get_bg(user_id)
+                
+                panels_module.get_selected_background_path = game_background_getter
+                logger.debug("Monkey-patched get_selected_background_path for !say command (user_id=%s, background_id=%s)", 
+                           target_state.user_id, player.background_id)
+        
+        try:
+            vn_file = render_vn_panel(
+                state=target_state,
+                message_content=cleaned_content,
+                character_display_name=character_display_name,
+                original_name=original_name,
+                attachment_id=str(ctx.message.id),
+                formatted_segments=formatted_segments,
+                custom_emoji_images=custom_emoji_images,
+                reply_context=reply_context,
+                selection_scope=selection_scope,
+                gacha_outfit_override=gacha_outfit_override,
+            )
+            if vn_file:
+                files.append(vn_file)
+        finally:
+            # CRITICAL: Restore original function (critical for isolation)
+            if original_func is not None:
+                import tfbot.panels as panels_module
+                panels_module.get_selected_background_path = original_func
+                logger.debug("Restored original get_selected_background_path after !say render")
 
     description = cleaned_content if cleaned_content else "*no message content*"
     if not files:

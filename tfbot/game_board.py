@@ -127,6 +127,33 @@ def _resolve_face_cache_path(character_name: str) -> Optional[Path]:
     return None
 
 
+def _get_board_cache_path(game_state: GameState, assets_dir: Path, output_ext: str = ".webp") -> Path:
+    """Generate cache path for rendered board based on game state."""
+    cache_dir = assets_dir / "boards" / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create cache key from game state
+    # Include: game_thread_id, turn_count, player positions, character names
+    cache_data = {
+        "thread_id": game_state.game_thread_id,
+        "turn": game_state.turn_count,
+        "debug_mode": game_state.debug_mode,  # Include debug_mode in cache key
+        "players": {
+            str(pid): {
+                "pos": p.grid_position,
+                "char": p.character_name or "",
+            }
+            for pid, p in game_state.players.items()
+        }
+    }
+    
+    # Simple hash of cache data (using string representation)
+    import hashlib
+    cache_key = hashlib.md5(str(cache_data).encode()).hexdigest()[:16]
+    
+    return cache_dir / f"board_{cache_key}{output_ext}"
+
+
 def parse_alphanumeric_coordinate(coord: str) -> Optional[Tuple[int, int]]:
     """
     Parse alphanumeric coordinate (e.g., "A1", "B5") to (column_index, row_index).
@@ -252,6 +279,28 @@ def render_game_board(
     if not board_path.exists():
         logger.warning("Board image not found: %s", board_path)
         return None
+    
+    # Detect source board image format
+    source_format = board_path.suffix.lower()  # .webp or .png
+    output_format = "WEBP" if source_format == ".webp" else "PNG"
+    output_ext = source_format  # .webp or .png
+    output_filename = f"game_board{output_ext}"
+    
+    # Check cache first
+    cache_path = _get_board_cache_path(game_state, assets_dir, output_ext)
+    if cache_path.exists():
+        try:
+            # Load cached board (WEBP or PNG)
+            with open(cache_path, 'rb') as f:
+                cached_bytes = f.read()
+            img_bytes = io.BytesIO(cached_bytes)
+            img_bytes.seek(0)
+            logger.info("Using cached board %s: %s", output_format, cache_path)
+            return discord.File(img_bytes, filename=output_filename)
+        except Exception as exc:
+            logger.warning("Failed to load cached board: %s", exc)
+            # Continue to render if cache load fails
+            # cache_path is still available for saving new cache below
     
     try:
         with Image.open(board_path) as board_img:
@@ -487,6 +536,20 @@ def render_game_board(
                     logger.info("Found face at: %s", face_path)
                 else:
                     logger.warning("Face NOT found for game character: '%s' (player: %s). Checked path: %s", character_name_for_face, player.user_id, face_path)
+                    
+                    # NEW: If face not found, compose avatar EXACTLY as VN mode does
+                    # VN mode flow: render_vn_panel -> compose_state_avatar_image -> compose_game_avatar -> _compose_game_avatar_uncached -> _cache_character_face
+                    # Gameboard flow: render_game_board -> compose_game_avatar -> _compose_game_avatar_uncached -> _cache_character_face (IDENTICAL)
+                    # _compose_game_avatar_uncached ALWAYS calls _cache_character_face() at line 2030, which:
+                    # 1. Detects face from avatar image (if missing)
+                    # 2. Saves to faces/character_name/variant_name/face.png in character_repo
+                    # 3. Queues git add/commit/push to character_repo (automatic, same as VN mode)
+                    if not face_path or not face_path.exists():
+                        # PERFORMANCE: Don't create face during render - it blocks rendering
+                        # Use colored circle fallback instead, face will be created on next render
+                        # (Face creation is queued in background by VN mode when needed)
+                        logger.debug("Face not found for %s - using colored circle fallback (face will be created in background)", character_name_for_face)
+                        face_path = None  # Force fallback to colored circle
             
             if face_path and face_path.exists():
                 try:
@@ -642,12 +705,25 @@ def render_game_board(
                     except Exception as exc:
                         logger.warning("Failed to draw player number label on circle: %s", exc)
     
-    # Convert to bytes
+    # Convert to bytes matching source format
     img_bytes = io.BytesIO()
-    board.save(img_bytes, format="PNG")
+    if output_format == "WEBP":
+        board.save(img_bytes, format="WEBP", quality=85)  # Quality 85 for good compression
+    else:
+        board.save(img_bytes, format="PNG")
     img_bytes.seek(0)
     
-    return discord.File(img_bytes, filename="game_board.png")
+    # Save to cache with correct extension (cache_path already defined above)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, 'wb') as f:
+            f.write(img_bytes.getvalue())
+        logger.info("Cached board %s: %s", output_format, cache_path)
+    except Exception as exc:
+        logger.warning("Failed to cache board %s: %s", output_format, exc)
+    
+    img_bytes.seek(0)
+    return discord.File(img_bytes, filename=output_filename)
 
 
 def validate_coordinate(coord: str, game_config: GameConfig) -> bool:
