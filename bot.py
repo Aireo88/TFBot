@@ -201,6 +201,56 @@ def _read_git_head_sha(
         return None
 
 
+def _read_git_toplevel(
+    git_executable: str, repo_dir: Path, startup_logger: logging.Logger
+) -> Optional[Path]:
+    try:
+        result = subprocess.run(
+            [git_executable, "-C", str(repo_dir), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        toplevel = result.stdout.strip()
+        if not toplevel:
+            return None
+        return Path(toplevel).resolve()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        startup_logger.debug("Unable to read git toplevel for %s: %s", repo_dir, exc)
+        return None
+
+
+def _abort_startup_for_characters_repo(message: str, startup_logger: logging.Logger) -> "None":
+    startup_logger.error(message)
+    print(f"\n[ERROR] {message}", file=sys.stderr)
+    try:
+        input("Press Enter to close...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    sys.exit(1)
+
+
+def _ensure_characters_repo_is_self_contained(
+    git_executable: str,
+    repo_dir: Path,
+    startup_logger: logging.Logger,
+) -> None:
+    actual_root = _read_git_toplevel(git_executable, repo_dir, startup_logger)
+    if actual_root is None:
+        return
+    expected_root = repo_dir.resolve()
+    if os.path.normcase(str(actual_root)) == os.path.normcase(str(expected_root)):
+        return
+    message = (
+        "Unsafe characters repo configuration detected. "
+        f"`{repo_dir}` resolves to git root `{actual_root}` instead of its own repo. "
+        "Starting the bot would let the characters repo sync run `git reset --hard` and `git clean -fd` "
+        "against the parent code repository, which can override local code changes. "
+        "Fix or reclone the characters repo before launching."
+    )
+    _abort_startup_for_characters_repo(message, startup_logger)
+
+
 def _detect_upstream_ref(
     git_executable: str, repo_dir: Path, startup_logger: logging.Logger
 ) -> Optional[str]:
@@ -309,6 +359,7 @@ def _sync_character_repo() -> Optional[Path]:
     else:
         old_head = None
         if repo_git_dir.exists():
+            _ensure_characters_repo_is_self_contained(git_executable, repo_dir, startup_logger)
             action = "sync"
             old_head = _read_git_head_sha(git_executable, repo_dir, startup_logger)
             synced = _hard_sync_existing_repo(git_executable, repo_dir, startup_logger)
@@ -417,18 +468,10 @@ _startup_logger.info(
 if _characters_repo_path:
     os.environ["TFBOT_VN_ASSET_ROOT"] = str(_characters_repo_path)
 elif os.getenv("TFBOT_CHARACTERS_REPO", "").strip():
-    _startup_logger.error(
-        "Characters repo could not be synced or used. Sprites will not load. Aborting startup."
+    _abort_startup_for_characters_repo(
+        "Characters repo could not be synced or used. Sprites will not load. Aborting startup.",
+        _startup_logger,
     )
-    print(
-        "\n[ERROR] Characters repo could not be synced or used. Sprites will not load. Aborting startup.",
-        file=sys.stderr,
-    )
-    try:
-        input("Press Enter to close...")
-    except (EOFError, KeyboardInterrupt):
-        pass
-    sys.exit(1)
 
 
 def _resolve_character_faces_root() -> Optional[Path]:
@@ -1929,22 +1972,96 @@ def _list_character_directory_names(refresh: bool = False) -> Sequence[str]:
     return names
 
 
+def _character_autocomplete_entries() -> Sequence[tuple[str, str, str]]:
+    entries: list[tuple[str, str, str]] = []
+    seen_values: set[str] = set()
+    basename_counts: Dict[str, int] = {}
+    for character in CHARACTER_POOL:
+        folder_token = _normalize_folder_token(character.folder)
+        if not folder_token:
+            continue
+        basename = folder_token.rsplit("/", 1)[-1]
+        basename_counts[basename] = basename_counts.get(basename, 0) + 1
+
+    for character in sorted(
+        CHARACTER_POOL,
+        key=lambda item: (
+            (item.name or "").strip().lower(),
+            _normalize_folder_token(item.folder),
+        ),
+    ):
+        folder_token = _normalize_folder_token(character.folder)
+        if not folder_token or folder_token in seen_values:
+            continue
+        basename = folder_token.rsplit("/", 1)[-1]
+        character_name = (character.name or "").strip()
+        choice_value = basename if basename_counts.get(basename, 0) == 1 else folder_token
+        if character_name:
+            match_source = f"{character_name} {folder_token} {basename}".lower()
+        else:
+            match_source = f"{folder_token} {basename}".lower()
+        entries.append((choice_value[:100], choice_value[:100], match_source))
+        seen_values.add(folder_token)
+    return entries
+
+
 def _autocomplete_character_names(
     query: str,
     guild: Optional[discord.Guild],
-) -> Sequence[str]:
+) -> Sequence[tuple[str, str]]:
     normalized = (query or "").strip().lower()
-    seen: set[str] = set()
-    results: list[str] = []
+    results: list[tuple[str, str]] = []
 
-    for name in _list_character_directory_names():
-        lowered = name.lower()
-        if normalized and normalized not in lowered:
+    for label, value, match_source in _character_autocomplete_entries():
+        if normalized and normalized not in match_source:
             continue
-        if name in seen:
+        results.append((label, value))
+        if len(results) >= CHARACTER_AUTOCOMPLETE_LIMIT:
+            break
+    return results
+
+
+def _autocomplete_active_character_names(
+    query: str,
+    guild: Optional[discord.Guild],
+) -> Sequence[tuple[str, str]]:
+    if guild is None:
+        return []
+    normalized = (query or "").strip().lower()
+    active_states = [
+        state for state in active_transformations.values()
+        if state.guild_id == guild.id and (state.character_name or "").strip()
+    ]
+    basename_counts: Dict[str, int] = {}
+    for state in active_states:
+        folder_token = _state_folder_token(state)
+        if not folder_token:
             continue
-        results.append(name)
-        seen.add(name)
+        basename = folder_token.rsplit("/", 1)[-1]
+        basename_counts[basename] = basename_counts.get(basename, 0) + 1
+
+    results: list[tuple[str, str]] = []
+    seen_values: set[str] = set()
+    for state in sorted(
+        active_states,
+        key=lambda item: (
+            (item.character_name or "").strip().lower(),
+            _state_folder_token(item),
+            int(item.user_id),
+        ),
+    ):
+        folder_token = _state_folder_token(state)
+        if not folder_token:
+            continue
+        basename = folder_token.rsplit("/", 1)[-1]
+        value = basename if basename_counts.get(basename, 0) == 1 else folder_token
+        if value in seen_values:
+            continue
+        match_source = f"{(state.character_name or '').strip()} {folder_token} {basename}".lower()
+        if normalized and normalized not in match_source:
+            continue
+        results.append((value[:100], value[:100]))
+        seen_values.add(value)
         if len(results) >= CHARACTER_AUTOCOMPLETE_LIMIT:
             break
     return results
@@ -1956,7 +2073,17 @@ async def _character_name_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     guild = interaction.guild
     matches = _autocomplete_character_names(current, guild)
-    return [app_commands.Choice(name=name, value=name) for name in matches]
+    return [app_commands.Choice(name=label, value=value) for label, value in matches]
+
+
+async def _active_character_name_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    await ensure_state_restored()
+    guild = interaction.guild
+    matches = _autocomplete_active_character_names(current, guild)
+    return [app_commands.Choice(name=label, value=value) for label, value in matches]
 
 
 async def _outfit_autocomplete(
@@ -7209,7 +7336,7 @@ async def reroll_command(ctx: commands.Context, *, args: str = ""):
     who_character="Folder of the active form to reroll.",
     to_character="Folder to force (admins or special forms only).",
 )
-@app_commands.autocomplete(who_character=_character_name_autocomplete, to_character=_character_name_autocomplete)
+@app_commands.autocomplete(who_character=_active_character_name_autocomplete, to_character=_character_name_autocomplete)
 @app_commands.guild_only()
 async def slash_reroll_command(
     interaction: discord.Interaction,
@@ -9625,7 +9752,10 @@ def _find_state_by_token(guild: discord.Guild, token: str) -> Optional[Transform
             if state.guild_id != guild.id:
                 continue
             folder_token = _state_folder_token(state)
-            if folder_token and folder_token in folder_tokens:
+            if not folder_token:
+                continue
+            folder_candidates = {folder_token, folder_token.rsplit("/", 1)[-1]}
+            if folder_tokens & folder_candidates:
                 folder_matches.append(state)
     folder_match = _unique_state_match(folder_matches)
     if folder_match is not None:

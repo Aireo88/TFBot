@@ -82,6 +82,37 @@ class CharacterTargetingTests(unittest.TestCase):
         self.assertIs(bot._find_state_by_token(guild, "kiyo"), kiyo_state)
         self.assertIs(bot._find_state_by_token(guild, "kiyoshi"), kiyoshi_state)
 
+    def test_active_state_lookup_accepts_folder_basename(self) -> None:
+        john_fem_state = self._make_state(103, "john fem (katrina's notebook)")
+        bot.active_transformations[bot.state_key(4242, 103)] = john_fem_state
+        guild = _FakeGuild(4242, [_FakeMember(103, "User Three", "userthree")])
+
+        self.assertIs(bot._find_state_by_token(guild, "johnfem"), john_fem_state)
+
+    def test_character_autocomplete_returns_real_folder_tokens(self) -> None:
+        kiyoshi_matches = bot._autocomplete_character_names("kiyoshi", None)
+        katrina_matches = bot._autocomplete_character_names("katrina", None)
+
+        self.assertTrue(
+            any(value == "kiyoshi" for _label, value in kiyoshi_matches)
+        )
+        self.assertTrue(
+            any(value == "katrina" for _label, value in katrina_matches)
+        )
+        self.assertFalse(
+            any(value == "st_characters" for _label, value in kiyoshi_matches)
+        )
+
+    def test_active_character_autocomplete_lists_only_active_forms(self) -> None:
+        john_fem_state = self._make_state(103, "john fem (katrina's notebook)")
+        bot.active_transformations[bot.state_key(4242, 103)] = john_fem_state
+        guild = _FakeGuild(4242, [_FakeMember(103, "User Three", "userthree")])
+
+        matches = bot._autocomplete_active_character_names("johnfem", guild)
+
+        self.assertIn(("johnfem", "johnfem"), matches)
+        self.assertFalse(any(value == "kiyoshi" for _label, value in matches))
+
 
 if __name__ == "__main__":
     unittest.main()
