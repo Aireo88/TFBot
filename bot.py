@@ -9390,6 +9390,19 @@ def _name_matches_token(name: str, token: str) -> bool:
     return False
 
 
+def _name_matches_token_strict(name: str, token: str) -> bool:
+    name_normalized = (name or "").strip().lower()
+    if not name_normalized:
+        return False
+    variants = _token_variants(token)
+    if not variants:
+        return False
+    if name_normalized in variants:
+        return True
+    first_word = _pool_name_first_token_lower(name)
+    return bool(first_word and first_word in variants)
+
+
 def _identity_pool_name_best_match_for_token(identity_root_name: str, token: str) -> Optional[str]:
     """Best pool ``name`` in the identity group for ``identity_root_name`` that matches ``token``.
 
@@ -9443,23 +9456,13 @@ def _character_matches_token(character: TFCharacter, token: str) -> bool:
         for folder_candidate in folder_candidates:
             if folder_candidate in variants:
                 return True
-    name_normalized = character.name.strip().lower()
-    identity_names = [n for n in identity_names_for_character_name(character.name) if (n or "").strip()]
-    identity_lower = {n.strip().lower() for n in identity_names}
-    first_words: set[str] = set()
-    fw0 = _pool_name_first_token_lower(character.name)
-    if fw0:
-        first_words.add(fw0)
-    for n in identity_names:
-        fw = _pool_name_first_token_lower(n)
-        if fw:
-            first_words.add(fw)
-    for variant in variants:
-        if variant == name_normalized or variant in identity_lower:
-            return True
-        if variant in first_words:
-            return True
-    return False
+    return _name_matches_token_strict(character.name, token)
+
+
+def _unique_state_match(states: Sequence[TransformationState]) -> Optional[TransformationState]:
+    if len(states) != 1:
+        return None
+    return states[0]
 
 
 def _variant_family_candidates_for_token(guild: discord.Guild, token: str) -> List[TransformationState]:
@@ -9520,7 +9523,7 @@ def _find_clone_source_state_by_token(
         visible_normalized = label.strip().lower()
         visible_first = visible_normalized.split(" ", 1)[0]
         if (
-            _name_matches_token(label, normalized)
+            _name_matches_token_strict(label, normalized)
             or visible_normalized in token_variants
             or (not slug_intent and visible_first in token_variants)
         ):
@@ -9557,11 +9560,13 @@ def _find_state_by_token(guild: discord.Guild, token: str) -> Optional[Transform
             entry = CHARACTER_BY_NAME.get((state.character_name or "").strip().lower())
             if entry is not None and getattr(entry, "_pack_name", None) == pack_file:
                 pack_matches.append(state)
-        if len(pack_matches) == 1:
-            return pack_matches[0]
+        pack_match = _unique_state_match(pack_matches)
+        if pack_match is not None:
+            return pack_match
 
     # Visible VN identity first. This is what users intuitively mean when they
     # target a swapped name like "riley".
+    visible_matches: List[TransformationState] = []
     for state in active_transformations.values():
         if state.guild_id != guild.id:
             continue
@@ -9581,9 +9586,13 @@ def _find_state_by_token(guild: discord.Guild, token: str) -> Optional[Transform
             if visible_normalized in token_variants or (
                 not slug_intent and visible_first in token_variants
             ):
-                return state
+                visible_matches.append(state)
+    visible_match = _unique_state_match(visible_matches)
+    if visible_match is not None:
+        return visible_match
 
     # Then resolve by the real person behind the state.
+    member_matches: List[TransformationState] = []
     for state in active_transformations.values():
         if state.guild_id != guild.id:
             continue
@@ -9603,29 +9612,35 @@ def _find_state_by_token(guild: discord.Guild, token: str) -> Optional[Transform
                 or username in token_variants
                 or (not slug_intent and username_first in token_variants)
             ):
-                return state
+                member_matches.append(state)
+    member_match = _unique_state_match(member_matches)
+    if member_match is not None:
+        return member_match
 
     # Finally fall back to body/form matching for explicit body-style tokens.
     folder_tokens = _folder_lookup_tokens(normalized)
+    folder_matches: List[TransformationState] = []
     if folder_tokens:
         for state in active_transformations.values():
             if state.guild_id != guild.id:
                 continue
             folder_token = _state_folder_token(state)
             if folder_token and folder_token in folder_tokens:
-                return state
+                folder_matches.append(state)
+    folder_match = _unique_state_match(folder_matches)
+    if folder_match is not None:
+        return folder_match
+    strict_name_matches: List[TransformationState] = []
     for state in active_transformations.values():
         if state.guild_id != guild.id:
             continue
-        if _name_matches_token(state.character_name, normalized):
-            return state
+        if _name_matches_token_strict(state.character_name, normalized):
+            strict_name_matches.append(state)
+            continue
         character_entry = CHARACTER_BY_NAME.get(state.character_name.strip().lower())
         if character_entry and _character_matches_token(character_entry, normalized):
-            return state
-    variant_family_matches = _variant_family_candidates_for_token(guild, normalized)
-    if len(variant_family_matches) == 1:
-        return variant_family_matches[0]
-    return None
+            strict_name_matches.append(state)
+    return _unique_state_match(strict_name_matches)
 
 
 def _find_state_for_bg_target(guild: discord.Guild, token: str) -> Optional[TransformationState]:
@@ -9652,13 +9667,38 @@ def _find_character_by_token(token: str) -> Optional[TFCharacter]:
     normalized = (token or "").strip()
     if not normalized:
         return None
-    for folder_token in _folder_lookup_tokens(normalized):
-        match = CHARACTER_BY_FOLDER.get(folder_token)
-        if match:
-            return match
-    for character in CHARACTER_POOL:
-        if _character_matches_token(character, normalized):
-            return character
+    folder_tokens = _folder_lookup_tokens(normalized)
+    if folder_tokens:
+        folder_matches: List[TFCharacter] = []
+        for character in CHARACTER_POOL:
+            folder_name_raw = (character.folder or "").strip()
+            if not folder_name_raw:
+                continue
+            folder_normalized = folder_name_raw.replace("\\", "/").strip("/").lower()
+            folder_candidates = {folder_normalized, folder_normalized.rsplit("/", 1)[-1]}
+            if folder_tokens & folder_candidates:
+                folder_matches.append(character)
+        if len(folder_matches) == 1:
+            return folder_matches[0]
+
+    variants = _token_variants(normalized)
+    exact_name_matches = [
+        character for character in CHARACTER_POOL
+        if (character.name or "").strip().lower() in variants
+    ]
+    if len(exact_name_matches) == 1:
+        return exact_name_matches[0]
+
+    first_token_matches = [
+        character for character in CHARACTER_POOL
+        if _pool_name_first_token_lower(character.name) in variants
+    ]
+    if len(first_token_matches) == 1:
+        return first_token_matches[0]
+
+    matches = [character for character in CHARACTER_POOL if _character_matches_token(character, normalized)]
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
